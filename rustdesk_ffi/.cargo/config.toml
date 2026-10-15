@@ -1,0 +1,15 @@
+# OHOS 交叉编译基础配置。
+# scripts/build_rustdesk_ffi_ohos.sh 注入当前平台的 linker 和 sysroot；
+# macOS 的 scripts/macos_env.sh 也提供同样的目标环境变量。
+
+[target.aarch64-unknown-linux-ohos]
+linker = "clang++"
+rustflags = [
+    "-C", "link-arg=--target=aarch64-linux-ohos",
+]
+
+[target.x86_64-unknown-linux-ohos]
+linker = "clang++"
+rustflags = [
+    "-C", "link-arg=--target=x86_64-linux-ohos",
+]

@@ -1,0 +1,57 @@
+name: Deploy privacy policy Pages
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'docs/privacy/**'
+      - '.github/workflows/privacy-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare privacy-only static site
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p site/privacy
+          grep -Fq 'ohos.permission.DISTRIBUTED_DATASYNC' docs/privacy/index.html
+          cp docs/privacy/index.html site/privacy/index.html
+          printf '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=privacy/"><a href="privacy/">隐私政策</a>\n' > site/index.html
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

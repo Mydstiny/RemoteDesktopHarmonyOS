@@ -1,0 +1,65 @@
+import { describe, it, expect } from '@ohos/hypium';
+import {
+  firstInstallGuidePages,
+  GuideContentPage,
+  settingsUsageGuidePages
+} from '../../../main/ets/services/GuideContentRegistry';
+import {
+  CURRENT_RELEASE_VERSION,
+  currentReleasePageCount,
+  pagesForReleasedVersion,
+  ReleaseNotePage
+} from '../../../main/ets/services/ReleaseNotesRegistry';
+
+function containsGuidePage(pages: GuideContentPage[], id: string): boolean {
+  return pages.some((page: GuideContentPage): boolean => page.id === id);
+}
+
+function containsReleasePage(pages: ReleaseNotePage[], id: string): boolean {
+  return pages.some((page: ReleaseNotePage): boolean => page.id === id);
+}
+
+export default function guideContentRegistryTest(): void {
+  describe('GuideContentRegistry', (): void => {
+    it('keeps_both_guides_equal_except_the_final_page', 0, (): void => {
+      const firstInstall: GuideContentPage[] = firstInstallGuidePages();
+      const settings: GuideContentPage[] = settingsUsageGuidePages();
+      expect(firstInstall.length).assertEqual(8);
+      expect(settings.length).assertEqual(firstInstall.length);
+      for (let i = 0; i < firstInstall.length - 1; i++) {
+        expect(settings[i].id).assertEqual(firstInstall[i].id);
+        expect(settings[i].title).assertEqual(firstInstall[i].title);
+        expect(settings[i].desc).assertEqual(firstInstall[i].desc);
+      }
+      expect(firstInstall[firstInstall.length - 1].id).assertEqual('start-first-host');
+      expect(settings[settings.length - 1].id).assertEqual('revisit');
+    });
+
+    it('covers_current_features_and_the_complete_release', 0, (): void => {
+      const guide: GuideContentPage[] = firstInstallGuidePages();
+      const current: ReleaseNotePage[] = pagesForReleasedVersion(CURRENT_RELEASE_VERSION);
+      expect(current.length).assertEqual(1);
+      expect(currentReleasePageCount()).assertEqual(1);
+      expect(current[0].id).assertEqual('release-open-source');
+      const release: ReleaseNotePage[] = pagesForReleasedVersion('1.1.5.1');
+      expect(containsGuidePage(guide, 'welcome-five-protocols')).assertTrue();
+      expect(containsGuidePage(guide, 'session-toolkit')).assertTrue();
+      expect(containsGuidePage(guide, 'data-recovery-and-help')).assertTrue();
+      expect(release.length).assertEqual(14);
+      expect(release.length <= 14).assertTrue();
+      expect(containsReleasePage(release, 'release-1-1-5-1')).assertTrue();
+      expect(containsReleasePage(release, 'release-flip-fallback-diagnostics')).assertTrue();
+      expect(containsReleasePage(release, 'release-rdp-ephemeral-auth')).assertTrue();
+      expect(containsReleasePage(release, 'release-rdp-pointer-mapping')).assertTrue();
+      expect(containsReleasePage(release, 'release-rdp-resolution-scaling')).assertTrue();
+      expect(containsReleasePage(release, 'release-rustdesk-clipboard')).assertTrue();
+      expect(containsReleasePage(release, 'release-harmony-shortcut-capture')).assertTrue();
+      expect(containsReleasePage(release, 'release-1-1-5')).assertFalse();
+      expect(containsReleasePage(release, 'release-1-1-4')).assertFalse();
+      expect(containsReleasePage(release, 'welcome-1-1-4')).assertFalse();
+      expect(containsReleasePage(release, 'release-1-1-3')).assertFalse();
+      expect(containsReleasePage(release, 'welcome-1-1-3')).assertFalse();
+      expect(release[release.length - 1].id).assertEqual('welcome-1-1-5-1');
+    });
+  });
+}

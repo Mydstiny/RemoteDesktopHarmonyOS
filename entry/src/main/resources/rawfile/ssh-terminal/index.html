@@ -1,0 +1,1284 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>SSH Terminal</title>
+  <link rel="stylesheet" href="./vendor/xterm-5.3.0.css">
+  <style>
+    /* Bundled terminal fonts (SIL OFL 1.1, see ./fonts/*-LICENSE.txt); Latin subset, CJK falls back. */
+    @font-face {
+      font-family: "JetBrains Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/jetbrains-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Fira Code";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/fira-code-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Fira Code";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/fira-code-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Source Code Pro";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/source-code-pro-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Source Code Pro";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/source-code-pro-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/ibm-plex-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Cascadia Code";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/cascadia-code-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Cascadia Code";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/cascadia-code-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Roboto Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/roboto-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Roboto Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/roboto-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Inconsolata";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/inconsolata-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Inconsolata";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/inconsolata-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Victor Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/victor-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Victor Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/victor-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Fira Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/fira-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Fira Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/fira-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Geist Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/geist-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Geist Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/geist-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Space Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/space-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Space Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/space-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Red Hat Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/red-hat-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Red Hat Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/red-hat-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Martian Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/martian-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Martian Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/martian-mono-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Anonymous Pro";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/anonymous-pro-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Anonymous Pro";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/anonymous-pro-latin-700-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Commit Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url("./fonts/commit-mono-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Commit Mono";
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url("./fonts/commit-mono-latin-700-normal.woff2") format("woff2");
+    }
+    :root {
+      color-scheme: dark;
+      background: #0d0d0d;
+      --ssh-terminal-bottom-inset: 10px;
+    }
+    html, body, #terminal {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #0d0d0d;
+    }
+    body {
+      overscroll-behavior: none;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: none;
+    }
+    #terminal {
+      box-sizing: border-box;
+    }
+    .xterm {
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      /* FitAddon measures this element, so keep the cell-safe inset here. */
+      padding: 5px 6px var(--ssh-terminal-bottom-inset);
+    }
+    .xterm-viewport {
+      background: transparent !important;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+      /* ArkWeb paints this absolute viewport against the full shell box. */
+      bottom: var(--ssh-terminal-bottom-inset);
+    }
+    .xterm-screen {
+      outline: none;
+    }
+    .xterm-helper-textarea {
+      position: absolute !important;
+      opacity: 0 !important;
+      color: transparent !important;
+      background: transparent !important;
+    }
+    @keyframes ssh-terminal-unfocused-cursor-blink {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+    /* ArkUI owns IME focus on HarmonyOS. Preserve the configured cursor blink
+       when xterm renders its unfocused cursor behind that native input anchor.
+       xterm uses a separate class for each configured cursor style. */
+    #terminal.ssh-cursor-blink-enabled .xterm-cursor.xterm-cursor-outline,
+    #terminal.ssh-cursor-blink-enabled .xterm-cursor.xterm-cursor-bar,
+    #terminal.ssh-cursor-blink-enabled .xterm-cursor.xterm-cursor-block,
+    #terminal.ssh-cursor-blink-enabled .xterm-cursor.xterm-cursor-underline {
+      animation: ssh-terminal-unfocused-cursor-blink 1s steps(1, end) infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal" role="application" aria-label="SSH 终端"></div>
+  <script src="./vendor/xterm-5.3.0.js"></script>
+  <script src="./vendor/xterm-addon-fit-0.8.0.js"></script>
+  <script src="./vendor/xterm-addon-search-0.13.0.js"></script>
+  <script src="./caret_geometry.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      // Keep page-side recovery bounded just like the ArkTS lifecycle fences.
+      // A document that never exposes xterm or the native bridge must stop
+      // scheduling work instead of keeping a dead WebView alive forever.
+      var PAGE_RETRY_MAX_ATTEMPTS = 240;
+
+      var state = {
+        terminal: null,
+        fitAddon: null,
+        searchAddon: null,
+        searchResults: { resultIndex: -1, resultCount: 0 },
+        lastModeSignature: '',
+        readyNotified: false,
+        readyRetryCount: 0,
+        readyRetryTimer: 0,
+        bootRetryCount: 0,
+        bootRetryTimer: 0,
+        webMessagePort: null,
+        webMessageSessionKey: '',
+        webMessageGeneration: 0,
+        webMessageNextSequence: 1,
+        webMessageLastReceivedSequence: 0,
+        webMessageReady: false,
+        fitTimer: 0,
+        fitGeneration: 0,
+        redispatchingWheel: false,
+        config: {
+          cols: 80,
+          rows: 24,
+          fontSize: 18,
+          lineHeight: 1.12,
+          fontFamily: 'monospace',
+          fontWeight: 'normal',
+          foreground: '#33ff33',
+          background: '#0d0d0d',
+          palette: [],
+          cursorStyle: 'bar',
+          cursorBlink: true,
+          scrollback: 10000,
+          bellStyle: 'none',
+          reverseWheel: false,
+          wheelSpeed: 1,
+          bottomAlignSparseContent: false,
+          bottomAlignSafeRows: 0,
+          bottomInsetPx: 10
+        }
+      };
+
+      function bridgeCall(method, args) {
+        try {
+          var bridge = window.sshTerminalBridge;
+          if (bridge && typeof bridge[method] === 'function') {
+            bridge[method].apply(bridge, args || []);
+            return true;
+          }
+        } catch (error) {
+          // A page can outlive its ArkTS component during route replacement.
+          // Dropping only the callback is safe; terminal bytes stay in the
+          // native owner and the next page receives a fresh view.
+          // Never forward a raw exception object to the Web console: bridge
+          // errors can carry implementation details or sensitive URL/path
+          // context. Keep only the fixed phase/method label.
+          try { console.warn('ssh bridge ' + method + ' failed'); } catch (_) {}
+        }
+        return false;
+      }
+
+      // API 23+ ArkWeb exposes a transferable WebMessagePort. Keep the page
+      // endpoint deliberately small and string-only: the native policy owns
+      // identity, sequence, queue and generation validation while this side
+      // only accepts the port transferred by the current document.
+      function allowedWebMessageKind(kind) {
+        return ['hello', 'hello_ack', 'ready', 'output', 'input', 'resize',
+          'search', 'ack', 'error', 'close'].indexOf(kind) >= 0;
+      }
+
+      function validWebMessageIdentity(sessionKey, generation) {
+        return typeof sessionKey === 'string' && sessionKey.trim().length > 0 &&
+          typeof generation === 'number' && isFinite(generation) &&
+          Math.floor(generation) === generation && generation > 0;
+      }
+
+      function webMessageUtf8ByteLength(value) {
+        var text = String(value || '');
+        var bytes = 0;
+        for (var index = 0; index < text.length; index += 1) {
+          var code = text.charCodeAt(index);
+          if (code <= 0x7f) {
+            bytes += 1;
+          } else if (code <= 0x7ff) {
+            bytes += 2;
+          } else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
+            var next = text.charCodeAt(index + 1);
+            if (next >= 0xdc00 && next <= 0xdfff) {
+              bytes += 4;
+              index += 1;
+            } else {
+              bytes += 3;
+            }
+          } else {
+            bytes += 3;
+          }
+        }
+        return bytes;
+      }
+
+      function decodeWebMessage(raw) {
+        if (typeof raw !== 'string' || raw.length === 0 || raw.length > 131072) return null;
+        try {
+          var parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== 'object' ||
+              typeof parsed.version !== 'number' || parsed.version !== 1 ||
+              typeof parsed.kind !== 'string' || !allowedWebMessageKind(parsed.kind) ||
+              typeof parsed.sessionKey !== 'string' ||
+              !validWebMessageIdentity(parsed.sessionKey, parsed.generation) ||
+              typeof parsed.sequence !== 'number' || !isFinite(parsed.sequence) ||
+              Math.floor(parsed.sequence) !== parsed.sequence || parsed.sequence <= 0 ||
+              typeof parsed.ackSequence !== 'number' || !isFinite(parsed.ackSequence) ||
+              Math.floor(parsed.ackSequence) !== parsed.ackSequence || parsed.ackSequence < 0 ||
+              typeof parsed.payload !== 'string') {
+            return null;
+          }
+          var payload = parsed.payload;
+          if (payload.length > 65536 || webMessageUtf8ByteLength(payload) > 65536) return null;
+          return {
+            version: 1,
+            kind: parsed.kind,
+            sessionKey: parsed.sessionKey.trim(),
+            generation: parsed.generation,
+            sequence: parsed.sequence,
+            ackSequence: parsed.ackSequence,
+            payload: payload
+          };
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function sendWebMessage(kind, payload, allowOpening) {
+        var port = state.webMessagePort;
+        if (!port || !validWebMessageIdentity(state.webMessageSessionKey,
+            state.webMessageGeneration) || (!state.webMessageReady && !allowOpening)) {
+          return false;
+        }
+        var text = payload === undefined || payload === null ? '' : String(payload);
+        if (text.length > 65536 || webMessageUtf8ByteLength(text) > 65536 ||
+            !allowedWebMessageKind(kind)) return false;
+        var envelope = {
+          version: 1,
+          kind: kind,
+          sessionKey: state.webMessageSessionKey,
+          generation: state.webMessageGeneration,
+          sequence: state.webMessageNextSequence++,
+          ackSequence: state.webMessageLastReceivedSequence,
+          payload: text
+        };
+        try {
+          port.postMessage(JSON.stringify(envelope));
+          return true;
+        } catch (error) {
+          try { console.warn('ssh web message post failed'); } catch (_) {}
+          state.webMessageReady = false;
+          try { port.close(); } catch (_) {}
+          state.webMessagePort = null;
+          return false;
+        }
+      }
+
+      function acceptWebMessage(envelope) {
+        if (!envelope || !state.webMessagePort ||
+            envelope.sessionKey !== state.webMessageSessionKey ||
+            envelope.generation !== state.webMessageGeneration ||
+            envelope.sequence !== state.webMessageLastReceivedSequence + 1 ||
+            envelope.ackSequence >= state.webMessageNextSequence) {
+          return false;
+        }
+        state.webMessageLastReceivedSequence = envelope.sequence;
+        return true;
+      }
+
+      function handleWebMessage(raw) {
+        var envelope = decodeWebMessage(raw);
+        if (!envelope) return;
+        if (envelope.kind === 'hello') {
+          if (envelope.sequence !== 1 || envelope.ackSequence !== 0) return;
+          if (state.webMessagePort && state.webMessageSessionKey &&
+              (envelope.sessionKey !== state.webMessageSessionKey ||
+               envelope.generation !== state.webMessageGeneration)) return;
+          state.webMessageSessionKey = envelope.sessionKey;
+          state.webMessageGeneration = envelope.generation;
+          state.webMessageNextSequence = 1;
+          state.webMessageLastReceivedSequence = envelope.sequence;
+          state.webMessageReady = false;
+          sendWebMessage('hello_ack', '', true);
+          return;
+        }
+        if (!acceptWebMessage(envelope)) return;
+        if (envelope.kind === 'ready') {
+          state.webMessageReady = true;
+          sendWebMessage('ack', JSON.stringify({ ready: true }), false);
+          return;
+        }
+        if (envelope.kind === 'close' || envelope.kind === 'error') {
+          state.webMessageReady = false;
+          try { state.webMessagePort.close(); } catch (_) {}
+          state.webMessagePort = null;
+          return;
+        }
+        if (!state.webMessageReady) return;
+        if (envelope.kind === 'output') {
+          try {
+            var output = JSON.parse(envelope.payload);
+            var batchSequence = Math.floor(Number(output && output.batchSequence));
+            var values = output && output.values;
+            if (!Array.isArray(values) || !isFinite(batchSequence) || batchSequence <= 0 ||
+                typeof window.__sshXtermWriteBatch !== 'function') return;
+            window.__sshXtermWriteBatch(values, batchSequence, true);
+          } catch (_) {}
+          return;
+        }
+      }
+
+      window.addEventListener('message', function (event) {
+        var ports = event && event.ports;
+        if (!ports || !ports.length || state.webMessagePort) return;
+        var port = ports[0];
+        if (!port || typeof port.postMessage !== 'function') return;
+        state.webMessagePort = port;
+        state.webMessageReady = false;
+        try {
+          port.onmessage = function (messageEvent) {
+            handleWebMessage(messageEvent && messageEvent.data);
+          };
+          if (typeof port.start === 'function') port.start();
+        } catch (_) {
+          state.webMessagePort = null;
+        }
+      });
+
+      function terminalInput(data) {
+        if (!sendWebMessage('input', data, false)) {
+          bridgeCall('onInput', [data]);
+        }
+      }
+
+      function terminalResize(cols, rows) {
+        var payload = JSON.stringify({ cols: Number(cols), rows: Number(rows) });
+        if (!sendWebMessage('resize', payload, false)) {
+          bridgeCall('onResize', [Number(cols), Number(rows)]);
+        }
+      }
+
+      // Mode changes are sparse control telemetry, so keep them on the
+      // identity-fenced JavaScript proxy even when bulk output uses a message
+      // port. Never publish a guessed safe state when the xterm API is absent.
+      function notifyTerminalMode(force) {
+        if (!state.terminal) return false;
+        try {
+          var modes = state.terminal.modes;
+          var active = state.terminal.buffer && state.terminal.buffer.active;
+          if (!modes || typeof modes.mouseTrackingMode !== 'string' ||
+              typeof modes.applicationCursorKeysMode !== 'boolean' ||
+              typeof modes.applicationKeypadMode !== 'boolean' || !active ||
+              (active.type !== 'normal' && active.type !== 'alternate')) return false;
+          var mouseTracking = modes.mouseTrackingMode !== 'none';
+          var applicationCursorKeys = modes.applicationCursorKeysMode === true;
+          var applicationKeypad = modes.applicationKeypadMode === true;
+          var alternateBuffer = active.type === 'alternate';
+          var signature = [mouseTracking, applicationCursorKeys,
+            applicationKeypad, alternateBuffer].join(':');
+          if (force !== true && signature === state.lastModeSignature) return true;
+          if (!bridgeCall('onMode', [mouseTracking, applicationCursorKeys,
+              applicationKeypad, alternateBuffer])) return false;
+          state.lastModeSignature = signature;
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function notifyReady() {
+        if (state.readyNotified || !state.terminal) return;
+        if (bridgeCall('onReady', [Number(state.terminal.cols), Number(state.terminal.rows)])) {
+          if (state.readyRetryTimer) {
+            window.clearTimeout(state.readyRetryTimer);
+            state.readyRetryTimer = 0;
+          }
+          state.readyRetryCount = 0;
+          state.readyNotified = true;
+          notifyTerminalMode(true);
+          return;
+        }
+        if (state.readyRetryTimer || state.readyRetryCount >= PAGE_RETRY_MAX_ATTEMPTS) return;
+        state.readyRetryCount += 1;
+        // ArkTS can register the proxy after the document has booted during a
+        // keyed host switch. Keep retrying at a low rate after the fast boot
+        // window, but stop after one bounded document lifecycle.
+        var retryDelay = state.readyRetryCount < 150 ? 32 : 250;
+        state.readyRetryTimer = window.setTimeout(function () {
+          state.readyRetryTimer = 0;
+          notifyReady();
+        }, retryDelay);
+      }
+
+      function fitTerminal() {
+        if (!state.fitAddon || !state.terminal) return false;
+        var root = document.getElementById('terminal');
+        if (!root) return false;
+        var rect = root.getBoundingClientRect ? root.getBoundingClientRect() : null;
+        if (!rect || Number(rect.width) < 2 || Number(rect.height) < 2) return false;
+        try {
+          state.fitAddon.fit();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function scheduleFit(attempt) {
+        var currentAttempt = Number(attempt) || 0;
+        var generation = ++state.fitGeneration;
+        if (state.fitTimer) {
+          window.clearTimeout(state.fitTimer);
+          state.fitTimer = 0;
+        }
+        function retryFit(retryAttempt) {
+          if (generation !== state.fitGeneration) return;
+          if (fitTerminal()) {
+            state.fitTimer = 0;
+            refreshTerminal();
+            alignSparseContent();
+            return;
+          }
+          if (retryAttempt >= 12) {
+            state.fitTimer = 0;
+            return;
+          }
+          state.fitTimer = window.setTimeout(function () {
+            retryFit(retryAttempt + 1);
+          }, 16);
+        }
+        retryFit(currentAttempt);
+      }
+
+      function refreshTerminal() {
+        if (!state.terminal) return;
+        try {
+          state.terminal.refresh(0, Math.max(0, state.terminal.rows - 1));
+        } catch (_) {}
+      }
+
+      function applyBottomSafeInset() {
+        var root = document.getElementById('terminal');
+        if (!root) return;
+        var safeRows = Math.max(0, Math.min(6,
+          Math.floor(Number(state.config.bottomAlignSafeRows) || 0)));
+        var fontSize = Math.max(12, Math.min(32,
+          Number(state.config.fontSize) || 18));
+        var lineHeight = Math.max(1, Math.min(1.6,
+          Number(state.config.lineHeight) || 1.12));
+        var safePixels = Math.ceil(safeRows * fontSize * lineHeight);
+        // Shrink the fitted terminal grid itself instead of only translating
+        // sparse startup rows. The shell prompt then remains above the system
+        // navigation area after long command output creates scrollback.
+        root.style.height = safePixels > 0
+          ? 'calc(100% - ' + safePixels + 'px)'
+          : '100%';
+      }
+
+      function wheelSensitivity() {
+        var speed = Number(state.config.wheelSpeed);
+        return isFinite(speed) && speed > 0 ? Math.max(0.25, Math.min(4, speed)) : 1;
+      }
+
+      function applyConfig(config) {
+        if (config) {
+          Object.keys(config).forEach(function (key) {
+            if (config[key] !== undefined && config[key] !== null) {
+              state.config[key] = config[key];
+            }
+          });
+        }
+        if (!state.terminal) return;
+        var terminal = state.terminal;
+        var fontSize = Number(state.config.fontSize);
+        if (!isFinite(fontSize)) fontSize = 18;
+        fontSize = Math.max(12, Math.min(32, fontSize));
+        var lineHeight = Number(state.config.lineHeight);
+        if (!isFinite(lineHeight)) lineHeight = 1.12;
+        lineHeight = Math.max(1, Math.min(1.6, lineHeight));
+        var bottomInsetPx = Number(state.config.bottomInsetPx);
+        if (!isFinite(bottomInsetPx)) bottomInsetPx = 10;
+        bottomInsetPx = Math.max(0, Math.min(32, Math.floor(bottomInsetPx)));
+        try {
+          document.documentElement.style.setProperty(
+            '--ssh-terminal-bottom-inset', bottomInsetPx + 'px');
+          document.documentElement.style.backgroundColor = state.config.background || '#0d0d0d';
+          document.body.style.backgroundColor = state.config.background || '#0d0d0d';
+          var terminalRoot = document.getElementById('terminal');
+          if (terminalRoot) {
+            terminalRoot.style.backgroundColor = state.config.background || '#0d0d0d';
+            terminalRoot.classList.toggle('ssh-cursor-blink-enabled',
+              state.config.cursorBlink !== false);
+          }
+        } catch (_) {}
+        try {
+          var palette = Array.isArray(state.config.palette) && state.config.palette.length === 16
+            ? state.config.palette : [];
+          var terminalTheme = {
+            foreground: state.config.foreground || '#33ff33',
+            background: state.config.background || '#0d0d0d',
+            cursor: state.config.cursor || state.config.foreground || '#33ff33',
+            cursorAccent: state.config.background || '#0d0d0d',
+            selectionBackground: state.config.selection || 'rgba(90, 140, 255, 0.42)'
+          };
+          var paletteNames = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
+            'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta',
+            'brightCyan', 'brightWhite'];
+          paletteNames.forEach(function (name, index) {
+            if (palette[index]) terminalTheme[name] = palette[index];
+          });
+          terminal.options.fontSize = fontSize;
+          terminal.options.lineHeight = lineHeight;
+          var fontFamily = state.config.fontFamily || 'monospace';
+          terminal.options.fontFamily = fontFamily;
+          // A bundled font may still be loading: once it is, re-measure the cells so the
+          // canvas atlas and the grid use the real glyph metrics.
+          if (fontFamily !== 'monospace' && document.fonts && document.fonts.load &&
+              state.loadedFontFamily !== fontFamily) {
+            var requestedFamily = fontFamily;
+            document.fonts.load(fontSize + 'px ' + fontFamily.split(',')[0]).then(function () {
+              if (state.config.fontFamily !== requestedFamily) return;
+              state.loadedFontFamily = requestedFamily;
+              try {
+                terminal.options.fontFamily = 'monospace';
+                terminal.options.fontFamily = requestedFamily;
+              } catch (_) {}
+              scheduleFit(0);
+            }).catch(function () {});
+          }
+          terminal.options.fontWeight = state.config.fontWeight === 'bold' ? 'bold' : 'normal';
+          terminal.options.cursorStyle = state.config.cursorStyle || 'bar';
+          terminal.options.cursorInactiveStyle = state.config.cursorStyle || 'bar';
+          terminal.options.cursorBlink = state.config.cursorBlink !== false;
+          terminal.options.scrollback = Math.max(1000, Math.min(100000,
+            Math.floor(Number(state.config.scrollback) || 10000)));
+          terminal.options.bellStyle = state.config.bellStyle || 'none';
+          // 设置 › 远程滚轮 › SSH 速度: rows per wheel notch / scroll stroke.
+          terminal.options.scrollSensitivity = wheelSensitivity();
+          terminal.options.theme = terminalTheme;
+        } catch (_) {}
+        applyBottomSafeInset();
+        var fitted = fitTerminal();
+        if (!fitted && state.config.cols && state.config.rows &&
+            (terminal.cols !== Number(state.config.cols) ||
+             terminal.rows !== Number(state.config.rows))) {
+          try { terminal.resize(Number(state.config.cols), Number(state.config.rows)); } catch (_) {}
+        }
+        scheduleFit(0);
+        refreshTerminal();
+        alignSparseContent();
+      }
+
+      // xterm keeps a fixed row grid. On a fresh shell with only a banner and
+      // prompt, move that grid's visible screen down so the sparse content
+      // sits on the bottom edge. Once scrollback or an alternate screen exists
+      // the normal xterm coordinates are restored, so history/TUI interaction
+      // is not affected.
+      function alignSparseContent() {
+        if (!state.terminal || !state.terminal.element) return;
+        var screen = state.terminal.element.querySelector('.xterm-screen');
+        if (!screen) return;
+        var offset = 0;
+        var geometry = null;
+        try {
+          var active = state.terminal.buffer && state.terminal.buffer.active;
+          var cursorY = active ? Number(active.cursorY) : state.terminal.rows - 1;
+          var baseY = active ? Number(active.baseY) : 1;
+          var alternate = active && active.type === 'alternate';
+          var container = state.terminal.element.getBoundingClientRect();
+          var screenRect = screen.getBoundingClientRect();
+          if (active && window.RemoteDeskTerminalCaretGeometry) {
+            geometry = window.RemoteDeskTerminalCaretGeometry.calculate({
+              cursorX: Number(active.cursorX), cursorY: cursorY, baseY: baseY,
+              viewportY: Number(active.viewportY), cols: Number(state.terminal.cols), rows: Number(state.terminal.rows),
+              cellWidth: Number(screen.offsetWidth || screenRect.width) / Math.max(1, Number(state.terminal.cols)),
+              cellHeight: Number(screen.offsetHeight || screenRect.height) / Math.max(1, Number(state.terminal.rows)),
+              screenLeft: screenRect.left - container.left,
+              screenTop: screenRect.top - container.top - (parseFloat(screen.style.top) || 0),
+              width: container.width, height: container.height, alternate: alternate,
+              sparse: state.config.bottomAlignSparseContent === true,
+              avoid: state.config.keyboardCaretAvoidance === true,
+              near: state.config.keyboardCaretNearBottom !== false, gap: Number(state.config.keyboardCaretGap)
+            });
+            if (geometry) offset = geometry.offset;
+          }
+        } catch (_) {}
+        var nextTop = Math.round(offset) + 'px';
+        if (screen.style.top !== nextTop) {
+          screen.style.top = nextTop;
+        }
+        if (geometry) {
+          var signature = [geometry.x, geometry.y, geometry.width, geometry.height, geometry.viewportWidth,
+            geometry.viewportHeight, geometry.visible, geometry.followingBottom, geometry.alternateBuffer].join('|');
+          if (signature !== state.caretSignature) {
+            state.caretSignature = signature;
+            state.caretGeometry = geometry;
+            if (!state.caretReportTimer) state.caretReportTimer = window.setTimeout(function () {
+              state.caretReportTimer = 0;
+              var g = state.caretGeometry;
+              state.caretSequence = (state.caretSequence || 0) + 1;
+              bridgeCall('onCaret', [state.caretSequence, g.x, g.y, g.width, g.height,
+                g.viewportWidth, g.viewportHeight, g.visible, g.followingBottom, g.alternateBuffer]);
+            }, 48);
+          }
+        }
+      }
+
+      function loadAddonSafely(addon, name) {
+        try {
+          state.terminal.loadAddon(addon);
+          return true;
+        } catch (error) {
+          // ArkWeb builds differ in the canvas APIs exposed to Web. The
+          // xterm DOM renderer remains a complete VT frontend, so one addon
+          // failure must not prevent input, output, or configuration wiring.
+          try { console.warn('ssh addon ' + name + ' unavailable'); } catch (_) {}
+          return false;
+        }
+      }
+
+      function boot() {
+        if (state.terminal) return;
+        if (!window.Terminal || !document.getElementById('terminal')) {
+          if (!state.bootRetryTimer && state.bootRetryCount < PAGE_RETRY_MAX_ATTEMPTS) {
+            state.bootRetryCount += 1;
+            state.bootRetryTimer = window.setTimeout(function () {
+              state.bootRetryTimer = 0;
+              boot();
+            }, 16);
+          }
+          return;
+        }
+        try {
+          var terminal = new window.Terminal({
+            cols: Number(state.config.cols) || 80,
+            rows: Number(state.config.rows) || 24,
+            scrollback: Math.max(1000, Math.min(100000,
+              Math.floor(Number(state.config.scrollback) || 10000))),
+            fontSize: Number(state.config.fontSize) || 18,
+            fontFamily: state.config.fontFamily || 'monospace',
+            fontWeight: state.config.fontWeight === 'bold' ? 'bold' : 'normal',
+            scrollSensitivity: wheelSensitivity(),
+            lineHeight: Number(state.config.lineHeight) || 1.12,
+            cursorBlink: state.config.cursorBlink !== false,
+            cursorStyle: state.config.cursorStyle || 'bar',
+            cursorInactiveStyle: state.config.cursorStyle || 'bar',
+            cursorWidth: 2,
+            bellStyle: state.config.bellStyle || 'none',
+            convertEol: false,
+            // Keep xterm's mature helper input enabled as a fallback when the
+            // ArkUI IME anchor cannot acquire focus during a page handoff.
+            disableStdin: false,
+            // SearchAddon 0.13 renders match highlights through xterm 5.3's
+            // registerDecoration API. Both assets are bundled and versioned
+            // together here, so explicitly allow that paired API surface.
+            allowProposedApi: true,
+            allowTransparency: false,
+            rightClickSelectsWord: true,
+            scrollOnUserInput: true,
+            fastScrollModifier: 'alt',
+            macOptionIsMeta: true,
+            theme: {
+              foreground: state.config.foreground || '#33ff33',
+              background: state.config.background || '#0d0d0d',
+              cursor: state.config.foreground || '#33ff33',
+              selectionBackground: 'rgba(90, 140, 255, 0.42)'
+            }
+          });
+          state.terminal = terminal;
+          if (state.bootRetryTimer) {
+            window.clearTimeout(state.bootRetryTimer);
+            state.bootRetryTimer = 0;
+          }
+          var terminalElement = document.getElementById('terminal');
+          terminal.open(terminalElement);
+          terminalElement.addEventListener('wheel', function (event) {
+            if (!event || state.config.reverseWheel !== true ||
+                state.redispatchingWheel === true) return;
+            var target = event.target && typeof event.target.dispatchEvent === 'function'
+              ? event.target : terminalElement;
+            var reversedEvent;
+            try {
+              reversedEvent = new WheelEvent('wheel', {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view: window,
+                detail: Number(event.detail) || 0,
+                screenX: Number(event.screenX) || 0,
+                screenY: Number(event.screenY) || 0,
+                clientX: Number(event.clientX) || 0,
+                clientY: Number(event.clientY) || 0,
+                ctrlKey: event.ctrlKey === true,
+                shiftKey: event.shiftKey === true,
+                altKey: event.altKey === true,
+                metaKey: event.metaKey === true,
+                button: Number(event.button) || 0,
+                buttons: Number(event.buttons) || 0,
+                deltaX: -(Number(event.deltaX) || 0),
+                deltaY: -(Number(event.deltaY) || 0),
+                deltaZ: -(Number(event.deltaZ) || 0),
+                deltaMode: Number(event.deltaMode) || 0
+              });
+            } catch (_) {
+              // Keep the original event intact if this Web runtime cannot
+              // construct a compatible WheelEvent.
+              return;
+            }
+            if (event.cancelable) event.preventDefault();
+            event.stopImmediatePropagation();
+            state.redispatchingWheel = true;
+            try { target.dispatchEvent(reversedEvent); } finally {
+              state.redispatchingWheel = false;
+            }
+          }, { capture: true, passive: false });
+          var touchPointerId = -1;
+          var touchLastY = 0;
+          var touchScrollRemainder = 0;
+          var touchMoved = false;
+          terminalElement.addEventListener('pointerdown', function (event) {
+            if (event && event.pointerType === 'touch') {
+              touchPointerId = Number(event.pointerId);
+              touchLastY = Number(event.clientY) || 0;
+              touchScrollRemainder = 0;
+              touchMoved = false;
+              try { terminalElement.setPointerCapture(event.pointerId); } catch (_) {}
+              // Prevent xterm's helper textarea from taking focus before we
+              // know whether this touch is a tap or a scroll gesture.
+              if (event.cancelable) event.preventDefault();
+              return;
+            }
+            // Mouse/pen enters input focus immediately. Touch waits until
+            // pointerup so dragging scrollback does not reopen the soft IME.
+            bridgeCall('onFocus', [true]);
+          }, true);
+          terminalElement.addEventListener('pointermove', function (event) {
+            if (!event || event.pointerType !== 'touch' ||
+                Number(event.pointerId) !== touchPointerId || !state.terminal) return;
+            var nextY = Number(event.clientY) || touchLastY;
+            var delta = touchLastY - nextY;
+            if (Math.abs(delta) >= 2) touchMoved = true;
+            var fontSize = Math.max(12, Math.min(32,
+              Number(state.config.fontSize) || 18));
+            var lineHeight = Math.max(1, Math.min(1.6,
+              Number(state.config.lineHeight) || 1.12));
+            var cellHeight = Math.max(8, fontSize * lineHeight);
+            var accumulated = touchScrollRemainder + delta;
+            var lines = accumulated < 0 ? Math.ceil(accumulated / cellHeight) :
+              Math.floor(accumulated / cellHeight);
+            if (lines !== 0) {
+              try { state.terminal.scrollLines(lines); } catch (_) {}
+              touchScrollRemainder = accumulated - lines * cellHeight;
+            } else {
+              touchScrollRemainder = accumulated;
+            }
+            touchLastY = nextY;
+            if (touchMoved && event.cancelable) event.preventDefault();
+          }, true);
+          function finishTouchPointer(event) {
+            if (!event || Number(event.pointerId) !== touchPointerId) return;
+            if (!touchMoved && event.type === 'pointerup') {
+              // ArkUI is the sole HarmonyOS IME owner. Report the user tap but
+              // do not focus xterm's helper textarea: ArkWeb cannot reliably
+              // attach the phone/Pad software keyboard to that hidden field.
+              bridgeCall('onFocus', [true]);
+            }
+            try { terminalElement.releasePointerCapture(event.pointerId); } catch (_) {}
+            touchPointerId = -1;
+            touchScrollRemainder = 0;
+            touchMoved = false;
+          }
+          terminalElement.addEventListener('pointerup', finishTouchPointer, true);
+          terminalElement.addEventListener('pointercancel', finishTouchPointer, true);
+
+          if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
+            state.fitAddon = new window.FitAddon.FitAddon();
+            loadAddonSafely(state.fitAddon, 'fit');
+          }
+          if (window.SearchAddon && typeof window.SearchAddon.SearchAddon === 'function') {
+            state.searchAddon = new window.SearchAddon.SearchAddon({ highlightLimit: 500 });
+            if (loadAddonSafely(state.searchAddon, 'search') &&
+                typeof state.searchAddon.onDidChangeResults === 'function') {
+              state.searchAddon.onDidChangeResults(function (results) {
+                state.searchResults = {
+                  resultIndex: Number(results && results.resultIndex) || 0,
+                  resultCount: Math.max(0, Number(results && results.resultCount) || 0)
+                };
+                if (state.searchResults.resultCount === 0) {
+                  state.searchResults.resultIndex = -1;
+                }
+              });
+            }
+          }
+
+          // Keep xterm's DOM renderer as the stable device path. CanvasAddon
+          // can leave ArkWeb with only a cursor after a GPU surface loss.
+          terminal.onData(function (data) {
+            terminalInput(data);
+          });
+          terminal.onResize(function (size) {
+            terminalResize(Number(size.cols), Number(size.rows));
+          });
+          terminal.onRender(function () {
+            alignSparseContent();
+          });
+          terminal.onScroll(function () {
+            alignSparseContent();
+          });
+          terminal.onCursorMove(function () { alignSparseContent(); });
+          terminal.onSelectionChange(function () {
+            bridgeCall('onSelection', [terminal.getSelection() || '']);
+          });
+          // Some ArkWeb xterm builds omit the focus event helpers. They are
+          // optional for SSH input because ArkUI owns the IME focus anchor;
+          // never let an absent helper abort the whole terminal boot.
+          if (typeof terminal.onFocus === 'function') {
+            terminal.onFocus(function () {
+              bridgeCall('onFocus', [true]);
+            });
+          }
+          if (typeof terminal.onBlur === 'function') {
+            terminal.onBlur(function () {
+              bridgeCall('onFocus', [false]);
+            });
+          }
+
+          applyConfig(state.config);
+          refreshTerminal();
+          alignSparseContent();
+          notifyReady();
+          // Only reset the boot budget after the complete xterm wiring has
+          // succeeded; constructor/open/listener failures must still count
+          // toward the same document-level bound.
+          state.bootRetryCount = 0;
+        } catch (error) {
+          // A transient ArkWeb DOM/renderer failure must be retryable. Leave
+          // pending output intact and never report xterm ready in this state.
+          state.terminal = null;
+          state.fitAddon = null;
+          state.searchAddon = null;
+          var terminalRoot = document.getElementById('terminal');
+          if (terminalRoot) terminalRoot.innerHTML = '';
+          try { console.warn('ssh xterm boot failed'); } catch (_) {}
+          if (!state.bootRetryTimer && state.bootRetryCount < PAGE_RETRY_MAX_ATTEMPTS) {
+            state.bootRetryCount += 1;
+            state.bootRetryTimer = window.setTimeout(function () {
+              state.bootRetryTimer = 0;
+              boot();
+            }, 80);
+          }
+        }
+      }
+
+      window.__sshXtermConfigure = function (config) {
+        applyConfig(config || {});
+      };
+
+      // ArkWeb may install the native proxy after this document's first boot.
+      // Keep a cheap idempotent entry point so the host can request a second
+      // ready notification from onPageEnd.
+      window.__sshXtermNotifyReady = function () {
+        if (!state.terminal) {
+          boot();
+        }
+        // ArkWeb can expose a stale proxy method before the native callback
+        // is actually wired. Let the host-side nudge retry that first probe.
+        state.readyNotified = false;
+        notifyReady();
+      };
+
+      window.__sshXtermWriteBatch = function (values, batchSequence, portMode) {
+        var sequence = Number(batchSequence) || 0;
+        if (!Array.isArray(values)) {
+          if (portMode === true) {
+            sendWebMessage('error', JSON.stringify({ batchSequence: sequence,
+              consumedCount: 0 }), false);
+          } else {
+            bridgeCall('onFrameError', [sequence, 0]);
+          }
+          return;
+        }
+        var texts = [];
+        values.forEach(function (value) {
+          var text = value === undefined || value === null ? '' : String(value);
+          if (text.length > 0) texts.push(text);
+        });
+        if (!state.terminal) {
+          // The parent still owns this batch. Queueing it in an untracked
+          // document and ACKing here would lose it if the document reloads
+          // before xterm boots.
+          if (portMode === true) {
+            sendWebMessage('error', JSON.stringify({ batchSequence: sequence,
+              consumedCount: 0 }), false);
+          } else {
+            bridgeCall('onFrameError', [sequence, 0]);
+          }
+          return;
+        }
+        if (texts.length === 0) {
+          if (portMode === true) {
+            sendWebMessage('ack', JSON.stringify({ batchSequence: sequence }), false);
+          } else {
+            bridgeCall('onFrame', [sequence]);
+          }
+          return;
+        }
+        var completed = false;
+        function completeBatch() {
+          if (completed) return;
+          completed = true;
+          refreshTerminal();
+          alignSparseContent();
+          notifyTerminalMode();
+          if (portMode === true) {
+            sendWebMessage('ack', JSON.stringify({ batchSequence: sequence }), false);
+          } else {
+            bridgeCall('onFrame', [sequence]);
+          }
+        }
+        var nextIndex = 0;
+        function failBatch() {
+          if (completed) return;
+          completed = true;
+          // Only the prefix whose callbacks completed is owned by xterm. The
+          // ArkTS side requeues the unconsumed suffix before reloading this
+          // document, preserving the global SSH FIFO without reordering it.
+          refreshTerminal();
+          alignSparseContent();
+          if (portMode === true) {
+            sendWebMessage('error', JSON.stringify({ batchSequence: sequence,
+              consumedCount: nextIndex }), false);
+          } else {
+            bridgeCall('onFrameError', [sequence, nextIndex]);
+          }
+        }
+        function writeNext() {
+          if (completed) return;
+          if (nextIndex >= texts.length) {
+            completeBatch();
+            return;
+          }
+          var callbackCalled = false;
+          var text = texts[nextIndex];
+          try {
+            state.terminal.write(text, function () {
+              if (callbackCalled || completed) return;
+              callbackCalled = true;
+              nextIndex += 1;
+              writeNext();
+            });
+          } catch (_) {
+            if (callbackCalled || completed) return;
+            callbackCalled = true;
+            failBatch();
+          }
+        }
+        // xterm's write callback is the only success boundary. A missing
+        // callback deliberately lets the ArkTS watchdog recover the complete
+        // unconfirmed batch instead of acknowledging output that may still be
+        // queued in the Web document.
+        writeNext();
+      };
+
+      window.__sshXtermReset = function () {
+        if (state.terminal) {
+          try { state.terminal.reset(); } catch (_) {}
+          alignSparseContent();
+          notifyTerminalMode(true);
+        }
+      };
+
+      window.__sshXtermFocus = function () {
+        if (state.terminal) {
+          try { state.terminal.focus(); } catch (_) {}
+        }
+      };
+
+      window.__sshXtermReportCaret = function () {
+        state.caretSignature = "";
+        alignSparseContent();
+      };
+
+      window.__sshXtermFit = function () {
+        scheduleFit(0);
+      };
+
+      window.__sshXtermScrollToBottom = function () {
+        if (state.terminal) {
+          try { state.terminal.scrollToBottom(); } catch (_) {}
+          alignSparseContent();
+        }
+      };
+
+      window.__sshXtermScrollLines = function (lines) {
+        if (state.terminal) {
+          try { state.terminal.scrollLines(Number(lines) || 0); } catch (_) {}
+          alignSparseContent();
+        }
+      };
+
+      window.__sshXtermGetSelection = function () {
+        return state.terminal ? (state.terminal.getSelection() || '') : '';
+      };
+
+      window.__sshXtermSearch = function (request, legacyForward) {
+        // Preserve the old two-argument boolean API for any retained caller.
+        if (typeof request !== 'object' || request === null) {
+          if (!state.searchAddon || !request) return false;
+          try {
+            return legacyForward === false ? state.searchAddon.findPrevious(String(request)) :
+              state.searchAddon.findNext(String(request));
+          } catch (_) {
+            return false;
+          }
+        }
+        var requestId = Math.max(0, Math.floor(Number(request.requestId) || 0));
+        var startedAt = window.performance && typeof window.performance.now === 'function' ?
+          window.performance.now() : Date.now();
+        function result(found, errorCode) {
+          var endedAt = window.performance && typeof window.performance.now === 'function' ?
+            window.performance.now() : Date.now();
+          return JSON.stringify({
+            requestId: requestId,
+            found: found === true,
+            resultIndex: Number(state.searchResults.resultIndex) ||
+              (state.searchResults.resultIndex === 0 ? 0 : -1),
+            resultCount: Math.max(0, Number(state.searchResults.resultCount) || 0),
+            elapsedMs: Math.max(0, endedAt - startedAt),
+            errorCode: errorCode || ''
+          });
+        }
+        if (!state.searchAddon) return result(false, 'search_unavailable');
+        var query = request.query === undefined || request.query === null ? '' :
+          String(request.query);
+        if (!query) return result(false, 'empty_query');
+        if (query.length > 512) return result(false, 'query_too_long');
+        var options = request.options || {};
+        if (options.regex === true) {
+          try { new RegExp(query, options.caseSensitive === true ? '' : 'i'); } catch (_) {
+            return result(false, 'invalid_regex');
+          }
+        }
+        state.searchResults = { resultIndex: -1, resultCount: 0 };
+        var searchOptions = {
+          caseSensitive: options.caseSensitive === true,
+          wholeWord: options.wholeWord === true,
+          regex: options.regex === true,
+          decorations: {
+            matchBackground: 'rgba(255, 193, 7, 0.34)',
+            matchBorder: 'rgba(255, 213, 79, 0.72)',
+            matchOverviewRuler: 'rgba(255, 193, 7, 0.82)',
+            activeMatchBackground: 'rgba(88, 166, 255, 0.62)',
+            activeMatchBorder: '#C7E2FF',
+            activeMatchColorOverviewRuler: '#58A6FF'
+          }
+        };
+        try {
+          var found = request.direction === 'previous' ?
+            state.searchAddon.findPrevious(query, searchOptions) :
+            state.searchAddon.findNext(query, searchOptions);
+          return result(found === true, '');
+        } catch (error) {
+          return result(false, options.regex === true ? 'invalid_regex' : 'execution_failed');
+        }
+      };
+
+      window.__sshXtermClearSearch = function () {
+        state.searchResults = { resultIndex: -1, resultCount: 0 };
+        if (state.searchAddon && typeof state.searchAddon.clearDecorations === 'function') {
+          try { state.searchAddon.clearDecorations(); } catch (_) {}
+        }
+        if (state.terminal) {
+          try { state.terminal.clearSelection(); } catch (_) {}
+        }
+        return true;
+      };
+
+      window.addEventListener('resize', function () {
+        scheduleFit(0);
+      });
+      boot();
+    })();
+  </script>
+</body>
+</html>

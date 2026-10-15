@@ -1,0 +1,15 @@
+{
+  "src": [
+    "pages/GuidePage",
+    "pages/RemoteSessionWindowBootstrap",
+    "pages/LoginPage",
+    "pages/HostListPage",
+    "pages/MoonlightHostDetailPage",
+    "pages/MoonlightAppCatalogPage",
+    "pages/MoonlightSettingsPage",
+    "pages/MoonlightStreamPage",
+    "pages/VncSettingsPage",
+    "pages/RemoteDesktop",
+    "pages/SshTerminal"
+  ]
+}

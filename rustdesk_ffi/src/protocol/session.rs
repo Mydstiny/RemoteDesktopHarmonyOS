@@ -1,0 +1,1596 @@
+// session.rs — RustDesk 远程会话管理
+//
+// 会话流程:
+//   1. 通过 Rendezvous 建立 P2P/中继连接
+//   2. 发送 LoginRequest (Message wrapper) → 接收 LoginResponse
+//   3. 成功后进入视频/音频流模式
+//   4. 主循环: 接收 Message → 分发 video_frame/audio_frame 等
+
+use super::message_proto::{
+    AudioFrame, Auth2FA, FileTransfer, ImageQuality, KeyEvent, LoginRequest, LoginResponse,
+    LoginResponse_oneof_union, Message, Message_oneof_union, Misc, Misc_oneof_union, MouseEvent,
+    OptionMessage, OptionMessage_BoolOption, PeerInfo, SupportedDecoding,
+    SupportedDecoding_PreferCodec, VideoFrame,
+};
+use super::wire;
+use protobuf::Message as ProtoMessage;
+use sha2::{Digest, Sha256};
+use std::ffi::{c_char, c_void, CString};
+use std::io;
+use std::net::TcpStream;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
+use crate::codec_evidence::RustDeskCodecEvidence;
+use std::time::{Duration, Instant};
+
+/// FFI callback for an interactive Peer authentication event.
+/// The message pointer is borrowed only for the duration of the callback.
+pub type AuthEventCallback = extern "C" fn(i32, *const c_char, *mut c_void);
+
+const AUTH_EVENT_ACCEPTED: i32 = 0;
+const AUTH_EVENT_REQUIRED: i32 = 1;
+const AUTH_EVENT_WRONG_CODE: i32 = 2;
+
+/// Native clients let the peer release encoder work as soon as a video frame
+/// is written to the socket. `video_received` is only valid when this login
+/// flag is true; sending it while the flag is false releases the same encoder
+/// credit twice and produces burst/gap video cadence on the peer.
+pub const VIDEO_ACK_REQUIRED: bool = false;
+
+/// 会话状态
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionState {
+    Disconnected,
+    LoggingIn,
+    WaitingRemoteApproval,
+    WaitingPeer2FA,
+    RetryingPeer2FA,
+    Connected,
+    Error(String),
+}
+
+/// 会话上下文
+pub struct Session {
+    state: SessionState,
+    peer_info: Option<PeerInfo>,
+    connect_epoch: u64,
+    connection_id: u64,
+    auth_callback: Option<(AuthEventCallback, usize)>,
+    file_auth: Option<Arc<crate::file_auth::FileAuthExchange>>,
+    pub(crate) codec_evidence: Arc<Mutex<RustDeskCodecEvidence>>,
+    /// PermissionInfo the server sends right after the hash (keyboard, clipboard,
+    /// file … disabled on the controlled side) arrives before login completes; it is
+    /// kept here and replayed into the control inbox once that exists.
+    login_permissions: Vec<super::message_proto::PermissionInfo>,
+}
+
+impl Session {
+    pub fn new() -> Self {
+        let connect_epoch = crate::current_connect_epoch();
+        Self::new_with_connection_id(0, connect_epoch)
+    }
+
+    pub fn new_with_connection_id(connection_id: u64, connect_epoch: u64) -> Self {
+        Self {
+            state: SessionState::Disconnected,
+            peer_info: None,
+            connect_epoch,
+            connection_id,
+            auth_callback: None,
+            file_auth: None,
+            codec_evidence: Arc::new(Mutex::new(RustDeskCodecEvidence::default())),
+            login_permissions: Vec::new(),
+        }
+    }
+
+    /// Permission changes received while logging in, oldest first.
+    pub(crate) fn take_login_permissions(&mut self) -> Vec<super::message_proto::PermissionInfo> {
+        std::mem::take(&mut self.login_permissions)
+    }
+
+    pub(crate) fn set_file_auth(&mut self, auth: Arc<crate::file_auth::FileAuthExchange>) { self.file_auth = Some(auth); }
+
+    fn record_peer_encoding(&self, info: &PeerInfo) {
+        if info.has_encoding() {
+            if let Ok(mut evidence) = self.codec_evidence.lock() {
+                evidence.record_peer_encoding(info.get_encoding());
+            }
+        }
+    }
+
+    pub fn set_auth_callback(
+        &mut self,
+        callback: Option<AuthEventCallback>,
+        user_data: *mut c_void,
+    ) {
+        self.auth_callback = callback.map(|cb| (cb, user_data as usize));
+    }
+
+    fn notify_auth_event(&self, state: i32, message: &str) {
+        let Some((callback, user_data)) = self.auth_callback else {
+            return;
+        };
+        let safe_message = CString::new(message).unwrap_or_else(|_| {
+            CString::new("RustDesk authentication event").expect("static auth message")
+        });
+        callback(state, safe_message.as_ptr(), user_data as *mut c_void);
+    }
+
+    /// 发送 LoginRequest 通过加密通道 (替代原始 TCP login)
+    pub fn login_encrypted(
+        &mut self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        peer_id: &str,
+        password: &str,
+        preferred_codec: i32,
+        image_quality: i32,
+        privacy_mode: bool,
+        audio_enabled: bool,
+        fps: u32,
+        request_approval: bool,
+    ) -> io::Result<()> {
+        self.login_encrypted_inner(
+            channel,
+            peer_id,
+            password,
+            preferred_codec,
+            image_quality,
+            privacy_mode,
+            audio_enabled,
+            fps,
+            request_approval,
+            None,
+        )?;
+        eprintln!("[RustDesk-FFI] login_encrypted response ok, sending stream options");
+        self.send_stream_options(
+            channel,
+            preferred_codec,
+            image_quality,
+            privacy_mode,
+            audio_enabled,
+            fps,
+        )
+    }
+
+    pub fn login_file_transfer_encrypted(
+        &mut self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        peer_id: &str,
+        password: &str,
+        remote_dir: &str,
+        request_approval: bool,
+    ) -> io::Result<()> {
+        self.login_encrypted_inner(
+            channel,
+            peer_id,
+            password,
+            0,
+            1,
+            false,
+            false,
+            30,
+            request_approval,
+            Some(remote_dir),
+        )?;
+        eprintln!(
+            "[RustDesk-FFI] login_file_transfer_encrypted response ok dir_id={}",
+            crate::safe_diagnostics::sensitive_id(remote_dir)
+        );
+        Ok(())
+    }
+
+    fn login_encrypted_inner(
+        &mut self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        peer_id: &str,
+        password: &str,
+        preferred_codec: i32,
+        image_quality: i32,
+        privacy_mode: bool,
+        audio_enabled: bool,
+        fps: u32,
+        request_approval: bool,
+        file_transfer_dir: Option<&str>,
+    ) -> io::Result<()> {
+        self.state = SessionState::LoggingIn;
+
+        let hash_deadline = Instant::now() + Duration::from_secs(30);
+        let challenge_payload = channel.recv_with_pump(|ch| {
+            if self.file_auth.is_some() {
+                if crate::connect_cancelled(self.connect_epoch) { return Err(io::Error::new(io::ErrorKind::Interrupted, "file authentication cancelled")); }
+                if Instant::now() >= hash_deadline { return Err(io::Error::new(io::ErrorKind::TimedOut, "file hash deadline")); }
+                if ch.buffered_receive_bytes() > 1024 * 1024 { return Err(io::Error::new(io::ErrorKind::InvalidData, "file hash too large")); }
+            }
+            Ok(())
+        }).map_err(|e| {
+            io::Error::new(e.kind(), "login hash read failed before LoginRequest")
+        })?;
+        if self.file_auth.is_some() && challenge_payload.len() > 1024 * 1024 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "file hash too large"));
+        }
+        let challenge_msg: Message = protobuf::parse_from_bytes(&challenge_payload)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let hash = match challenge_msg.union {
+            Some(Message_oneof_union::hash(hash)) => hash,
+            Some(Message_oneof_union::login_response(resp)) => {
+                let result = self.handle_login_response(resp);
+                if let Some(auth) = self.file_auth.as_ref() { auth.finish(result.is_ok()); }
+                return result;
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("expected login Hash before LoginRequest, got: {:?}", other),
+                ));
+            }
+        };
+
+        self.send_login_request(
+            channel,
+            peer_id,
+            password,
+            &hash,
+            preferred_codec,
+            image_quality,
+            privacy_mode,
+            audio_enabled,
+            fps,
+            file_transfer_dir,
+            request_approval,
+        )?;
+
+        if self.file_auth.is_some() {
+            return self.wait_file_login_response(channel, peer_id, password, preferred_codec, image_quality, privacy_mode, audio_enabled, fps, file_transfer_dir, request_approval, &hash);
+        }
+        self.wait_login_response(
+            channel,
+            peer_id,
+            password,
+            preferred_codec,
+            image_quality,
+            privacy_mode,
+            audio_enabled,
+            fps,
+            file_transfer_dir,
+            request_approval,
+            &hash,
+        )?;
+        Ok(())
+    }
+
+    fn send_login_request(
+        &self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        peer_id: &str,
+        password: &str,
+        hash: &super::message_proto::Hash,
+        preferred_codec: i32,
+        image_quality: i32,
+        privacy_mode: bool,
+        audio_enabled: bool,
+        fps: u32,
+        file_transfer_dir: Option<&str>,
+        request_approval: bool,
+    ) -> io::Result<()> {
+        let hashed_password = if request_approval || password.is_empty() {
+            Vec::new()
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(password.as_bytes());
+            hasher.update(hash.get_salt().as_bytes());
+            let first = hasher.finalize();
+
+            let mut hasher = Sha256::new();
+            hasher.update(&first[..]);
+            hasher.update(hash.get_challenge().as_bytes());
+            hasher.finalize()[..].to_vec()
+        };
+
+        let mut login = LoginRequest::new();
+        login.set_username(peer_id.to_string());
+        login.set_password(hashed_password);
+        login.set_my_id(Self::local_client_id(peer_id));
+        login.set_my_name("HarmonyOS-RemoteDesktop".to_string());
+        login.set_session_id(0);
+        login.set_version("2.0.0".to_string());
+        login.set_my_platform("OHOS".to_string());
+        login.set_video_ack_required(VIDEO_ACK_REQUIRED);
+        if let Some(dir) = file_transfer_dir {
+            let mut ft = FileTransfer::new();
+            ft.set_dir(dir.to_string());
+            ft.set_show_hidden(false);
+            login.set_file_transfer(ft);
+        }
+
+        let mut opt = OptionMessage::new();
+        opt.set_image_quality(Self::image_quality_from_pref(image_quality));
+        let decoding = Self::supported_decoding(preferred_codec);
+        opt.set_supported_decoding(decoding.clone());
+        opt.set_custom_fps(fps as i32);
+        opt.set_disable_audio(if audio_enabled {
+            OptionMessage_BoolOption::No
+        } else {
+            OptionMessage_BoolOption::Yes
+        });
+        opt.set_privacy_mode(if privacy_mode {
+            OptionMessage_BoolOption::Yes
+        } else {
+            OptionMessage_BoolOption::NotSet
+        });
+        login.option = protobuf::SingularPtrField::some(opt);
+
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::login_request(login));
+        let payload = msg
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let result = channel.send(&payload);
+        if let Ok(mut evidence) = self.codec_evidence.lock() {
+            evidence.record_send(preferred_codec, &decoding, 1, result.is_ok());
+        }
+        result
+    }
+
+    fn image_quality_from_pref(image_quality: i32) -> ImageQuality {
+        match image_quality {
+            0 => ImageQuality::Low,
+            2 => ImageQuality::Best,
+            _ => ImageQuality::Balanced,
+        }
+    }
+
+    fn image_quality_name(image_quality: i32) -> &'static str {
+        match image_quality {
+            0 => "Low",
+            2 => "Best",
+            _ => "Balanced",
+        }
+    }
+
+    fn supported_decoding(preferred_codec: i32) -> SupportedDecoding {
+        let mut decoding = SupportedDecoding::new();
+        match preferred_codec {
+            1 => {
+                decoding.set_ability_vp8(1);
+                decoding.set_prefer(SupportedDecoding_PreferCodec::VP8);
+            }
+            2 => {
+                decoding.set_ability_vp9(1);
+                decoding.set_prefer(SupportedDecoding_PreferCodec::VP9);
+            }
+            3 => {
+                decoding.set_ability_av1(1);
+                decoding.set_prefer(SupportedDecoding_PreferCodec::AV1);
+            }
+            5 => {
+                decoding.set_ability_vp8(1);
+                decoding.set_ability_vp9(1);
+                // Preference is not an exclusive capability. Preserve the
+                // working AVC hardware fallback when the peer cannot encode HEVC.
+                decoding.set_ability_h264(1);
+                decoding.set_ability_h265(1);
+                decoding.set_prefer(SupportedDecoding_PreferCodec::H265);
+            }
+            4 => {
+                // H264 优先，同时公告 VP8/VP9 回退 — 对齐 upstream 行为。
+                // 仅公告 H264 时若对端编码器异常则无退路，会停止发送。
+                decoding.set_ability_vp8(1);
+                decoding.set_ability_vp9(1);
+                decoding.set_ability_h264(1);
+                decoding.set_prefer(SupportedDecoding_PreferCodec::H264);
+            }
+            _ => {
+                decoding.set_ability_vp8(1);
+                decoding.set_ability_vp9(1);
+                decoding.set_ability_av1(1);
+                decoding.set_ability_h264(1);
+                decoding.set_ability_h265(1);
+                decoding.set_prefer(SupportedDecoding_PreferCodec::H264);
+            }
+        }
+        decoding
+    }
+
+    fn codec_name(preferred_codec: i32) -> &'static str {
+        match preferred_codec {
+            1 => "VP8",
+            2 => "VP9",
+            3 => "AV1",
+            4 => "H264",
+            5 => "H265",
+            _ => "auto",
+        }
+    }
+
+    fn default_fps_for_codec(preferred_codec: i32) -> u32 {
+        match preferred_codec {
+            1 | 2 | 3 => 45,
+            _ => 60,
+        }
+    }
+
+    pub fn send_stream_options(
+        &self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        preferred_codec: i32,
+        image_quality: i32,
+        privacy_mode: bool,
+        audio_enabled: bool,
+        fps: u32,
+    ) -> io::Result<()> {
+        eprintln!(
+            "[RustDesk-FFI] send_stream_options begin codec={} quality={}({}) fps={} privacy={} audio={}",
+            Self::codec_name(preferred_codec),
+            image_quality,
+            Self::image_quality_name(image_quality),
+            fps,
+            privacy_mode,
+            audio_enabled
+        );
+        if let Err(err) = self.send_runtime_options(
+            channel,
+            preferred_codec,
+            image_quality,
+            privacy_mode,
+            audio_enabled,
+            Some(fps),
+        ) {
+            eprintln!(
+                "[RustDesk-FFI] send_stream_options runtime options failed: {}",
+                err
+            );
+            return Err(err);
+        }
+        eprintln!("[RustDesk-FFI] send_stream_options runtime options ok");
+        if let Err(err) = Self::send_refresh_video(channel) {
+            eprintln!(
+                "[RustDesk-FFI] send_stream_options refresh_video failed: {}",
+                err
+            );
+            return Err(err);
+        }
+        eprintln!("[RustDesk-FFI] send_stream_options refresh_video ok");
+        Ok(())
+    }
+
+    pub fn send_runtime_options(
+        &self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        preferred_codec: i32,
+        image_quality: i32,
+        privacy_mode: bool,
+        audio_enabled: bool,
+        fps: Option<u32>,
+    ) -> io::Result<()> {
+        let custom_fps = fps.unwrap_or_else(|| Self::default_fps_for_codec(preferred_codec));
+        let mut opt = OptionMessage::new();
+        opt.set_image_quality(Self::image_quality_from_pref(image_quality));
+        let decoding = Self::supported_decoding(preferred_codec);
+        opt.set_supported_decoding(decoding.clone());
+        opt.set_custom_fps(custom_fps as i32);
+        opt.set_disable_audio(if audio_enabled {
+            OptionMessage_BoolOption::No
+        } else {
+            OptionMessage_BoolOption::Yes
+        });
+        opt.set_privacy_mode(if privacy_mode {
+            OptionMessage_BoolOption::Yes
+        } else {
+            OptionMessage_BoolOption::NotSet
+        });
+
+        let mut misc = Misc::new();
+        misc.union = Some(Misc_oneof_union::option(opt));
+
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::misc(misc));
+
+        let payload = msg
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let result = channel.send(&payload);
+        if let Ok(mut evidence) = self.codec_evidence.lock() {
+            evidence.record_send(preferred_codec, &decoding,
+                if channel.sends_are_queued() { 3 } else { 2 }, result.is_ok());
+        }
+        result?;
+        eprintln!(
+            "[RustDesk-FFI] submitted runtime OptionMessage supported_decoding={} quality={}({}) fps={} audio={}",
+            Self::codec_name(preferred_codec),
+            image_quality,
+            Self::image_quality_name(image_quality),
+            custom_fps,
+            if audio_enabled { "on" } else { "off" }
+        );
+        Ok(())
+    }
+
+    /// Send only the image-quality field, matching RustDesk's live
+    /// `sessionSetImageQuality` behavior without resetting codec, FPS, audio,
+    /// or privacy options owned by the active session.
+    pub fn send_image_quality(
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        image_quality: i32,
+    ) -> io::Result<()> {
+        let message = Self::build_image_quality_message(image_quality);
+        let payload = message
+            .write_to_bytes()
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        channel.send(&payload)?;
+        Ok(())
+    }
+
+    /// Send only the FPS cap, as official clients do after a quality change
+    /// (`set_custom_fps`), leaving every other session option untouched.
+    pub fn send_custom_fps(
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        fps: u32,
+    ) -> io::Result<()> {
+        let payload = Self::build_custom_fps_message(fps)
+            .write_to_bytes()
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        channel.send(&payload)
+    }
+
+    fn build_custom_fps_message(fps: u32) -> Message {
+        let mut opt = OptionMessage::new();
+        opt.set_custom_fps(fps as i32);
+        let mut misc = Misc::new();
+        misc.union = Some(Misc_oneof_union::option(opt));
+        let mut message = Message::new();
+        message.union = Some(Message_oneof_union::misc(misc));
+        message
+    }
+
+    fn build_image_quality_message(image_quality: i32) -> Message {
+        let mut opt = OptionMessage::new();
+        opt.set_image_quality(Self::image_quality_from_pref(image_quality));
+        let mut misc = Misc::new();
+        misc.union = Some(Misc_oneof_union::option(opt));
+        let mut message = Message::new();
+        message.union = Some(Message_oneof_union::misc(misc));
+        message
+    }
+
+    pub fn send_refresh_video(
+        channel: &mut crate::crypto_channel::CryptoChannel,
+    ) -> io::Result<()> {
+        // Misc.union 是 protobuf oneof，refresh_video、video_received 和
+        // refresh_video_display 不能写入同一个 Misc；后一次 setter 会覆盖前一次。
+        // 官方客户端会按对端版本发送独立消息。这里始终发送兼容旧版本的
+        // refresh_video=true，确保被控端真正触发首帧刷新；video_received 只在
+        // 收到视频帧后由 send_video_received() 单独发送。
+        let payload = Self::build_refresh_video_message()
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        channel.send(&payload)?;
+        eprintln!("[RustDesk-FFI] sent refresh_video=true");
+        Ok(())
+    }
+
+    fn build_refresh_video_message() -> Message {
+        let mut misc = Misc::new();
+        misc.set_refresh_video(true);
+
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::misc(misc));
+        msg
+    }
+
+    pub fn send_video_received(
+        channel: &mut crate::crypto_channel::CryptoChannel,
+    ) -> io::Result<()> {
+        let mut misc = Misc::new();
+        misc.set_video_received(true);
+
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::misc(misc));
+
+        let payload = msg
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        channel.send_low_priority(&payload)?;
+        Ok(())
+    }
+
+    /// Dedicated file jobs own their challenge mailbox; desktop authentication is untouched.
+    fn wait_file_login_response(
+        &mut self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        peer_id: &str,
+        password: &str,
+        preferred_codec: i32,
+        image_quality: i32,
+        privacy_mode: bool,
+        audio_enabled: bool,
+        fps: u32,
+        file_transfer_dir: Option<&str>,
+        request_approval: bool,
+        initial_hash: &super::message_proto::Hash,
+    ) -> io::Result<()> {
+        let auth = Arc::clone(self.file_auth.as_ref().unwrap());
+        auth.begin();
+        let mut hash = initial_hash.clone();
+        let mut approval = request_approval;
+        let mut current_password = crate::file_auth::Secret::new(password);
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut totp = false;
+        if approval {
+            auth.challenge(4)?;
+        } else if password.is_empty() {
+            auth.challenge(1)?;
+        }
+        channel.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let result = (|| -> io::Result<()> {
+            loop {
+                if crate::connect_cancelled(self.connect_epoch) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "file authentication cancelled",
+                    ));
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "file authentication deadline",
+                    ));
+                }
+                if let Some(response) = auth.take()? {
+                    match response.kind {
+                        1 => {
+                            current_password = response.secret;
+                            approval = false;
+                            self.send_login_request(
+                                channel,
+                                peer_id,
+                                current_password.as_str(),
+                                &hash,
+                                preferred_codec,
+                                image_quality,
+                                privacy_mode,
+                                audio_enabled,
+                                fps,
+                                file_transfer_dir,
+                                false,
+                            )?;
+                        }
+                        2 => Self::send_auth_2fa(channel, response.secret.as_str())?,
+                        3 => {
+                            current_password = crate::file_auth::Secret::new("");
+                            approval = true;
+                            auth.challenge(4)?;
+                            self.send_login_request(
+                                channel,
+                                peer_id,
+                                "",
+                                &hash,
+                                preferred_codec,
+                                image_quality,
+                                privacy_mode,
+                                audio_enabled,
+                                fps,
+                                file_transfer_dir,
+                                true,
+                            )?;
+                        }
+                        _ => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "file authentication response",
+                            ))
+                        }
+                    }
+                }
+                let payload = match channel.recv_with_pump(|ch| {
+                    if crate::connect_cancelled(self.connect_epoch) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "file authentication cancelled",
+                        ));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "file authentication deadline",
+                        ));
+                    }
+                    if ch.buffered_receive_bytes() > 1024 * 1024 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "file authentication frame too large",
+                        ));
+                    }
+                    Ok(())
+                }) {
+                    Ok(v) => v,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                        ) && Instant::now() < deadline =>
+                    {
+                        continue
+                    }
+                    Err(e) => return Err(e),
+                };
+                if payload.len() > 1024 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "file authentication frame too large",
+                    ));
+                }
+                let message: Message = protobuf::parse_from_bytes(&payload).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "file authentication message")
+                })?;
+                match message.union {
+                    Some(Message_oneof_union::login_response(response)) => {
+                        if response.has_error() {
+                            match response.get_error() {
+                                "2FA Required" | "Wrong 2FA Code" => {
+                                    totp = true;
+                                    auth.challenge(2)?;
+                                }
+                                "Empty Password" | "Wrong Password" if !totp => {
+                                    auth.challenge(1)?;
+                                }
+                                "No Password Access" if approval => {}
+                                "No Password Access" if !totp => {
+                                    auth.challenge(3)?;
+                                }
+                                text if text.to_ascii_lowercase().contains("file transfer") => {
+                                    // "No permission of file transfer": the peer turned file transfer off.
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::PermissionDenied,
+                                        "remote_file_transfer_disabled",
+                                    ));
+                                }
+                                text if text.to_ascii_lowercase().contains("logon")
+                                    || text.to_ascii_lowercase().contains("login screen") =>
+                                {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::PermissionDenied,
+                                        "peer_prelogin",
+                                    ));
+                                }
+                                _ => {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::PermissionDenied,
+                                        "file authentication rejected",
+                                    ))
+                                }
+                            }
+                            continue;
+                        }
+                        if let Some(LoginResponse_oneof_union::peer_info(info)) = response.union {
+                            self.record_peer_encoding(&info);
+                            self.peer_info = Some(info);
+                        }
+                        self.state = SessionState::Connected;
+                        auth.finish(true);
+                        return Ok(());
+                    }
+                    Some(Message_oneof_union::hash(next)) => {
+                        hash = next;
+                        if approval {
+                            self.send_login_request(
+                                channel,
+                                peer_id,
+                                "",
+                                &hash,
+                                preferred_codec,
+                                image_quality,
+                                privacy_mode,
+                                audio_enabled,
+                                fps,
+                                file_transfer_dir,
+                                true,
+                            )?;
+                        } else if !totp {
+                            auth.challenge(1)?;
+                        }
+                    }
+                    Some(Message_oneof_union::test_delay(delay)) => {
+                        let mut echo = Message::new();
+                        echo.union = Some(Message_oneof_union::test_delay(delay));
+                        channel.send(
+                            &echo
+                                .write_to_bytes()
+                                .map_err(|_| io::Error::other("file auth keepalive"))?,
+                        )?;
+                    }
+                    Some(Message_oneof_union::misc(misc)) => {
+                        if matches!(misc.union, Some(Misc_oneof_union::close_reason(_))) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "file authentication closed by peer",
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })();
+        channel.set_read_timeout(None).ok();
+        if result.is_err() {
+            auth.finish(false);
+        }
+        result
+    }
+
+    fn wait_login_response(
+        &mut self,
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        peer_id: &str,
+        password: &str,
+        preferred_codec: i32,
+        image_quality: i32,
+        privacy_mode: bool,
+        audio_enabled: bool,
+        fps: u32,
+        file_transfer_dir: Option<&str>,
+        request_approval: bool,
+        initial_hash: &super::message_proto::Hash,
+    ) -> io::Result<()> {
+        const APPROVAL_TIMEOUT: Duration = Duration::from_secs(90);
+        const PASSWORD_TIMEOUT: Duration = Duration::from_secs(30);
+        const PEER_2FA_TIMEOUT: Duration = Duration::from_secs(90);
+        const NO_PASSWORD_ACCESS: &str = "No Password Access";
+        const REQUIRE_2FA: &str = "2FA Required";
+        const WRONG_2FA: &str = "Wrong 2FA Code";
+        let mut deadline = Instant::now()
+            + if request_approval {
+                APPROVAL_TIMEOUT
+            } else {
+                PASSWORD_TIMEOUT
+            };
+        let _pending_2fa_guard = PendingTwoFactorGuard {
+            epoch: self.connect_epoch,
+            session_id: self.connection_id,
+        };
+        let mut auth_receiver: Option<Receiver<String>> = None;
+        // The initial challenge is not a completed LoginRequest. In
+        // particular, approval-mode peers commonly echo that same hash; the
+        // first echo must still receive a LoginRequest. Repeated hashes are
+        // retransmissions, not permission to silently stop asking.
+        let mut last_challenge: Option<[u8; 32]> = None;
+        let mut last_variant = "none".to_string();
+
+        // 官方在等待被控端批准时保持加密通道，期间允许 TestDelay 保活。
+        channel.set_read_timeout(Some(Duration::from_millis(250)))?;
+        let result = loop {
+            if crate::connect_cancelled(self.connect_epoch) {
+                self.state = SessionState::Error("connection cancelled".to_string());
+                break Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "connection cancelled",
+                ));
+            }
+            if Instant::now() >= deadline {
+                self.state = SessionState::Error(if request_approval {
+                    "remote approval timed out after 90s".to_string()
+                } else {
+                    "login response timed out after 30s".to_string()
+                });
+                break Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    if request_approval {
+                        "remote approval timed out after 90s"
+                    } else {
+                        "login response timed out after 30s"
+                    },
+                ));
+            }
+
+            if let Some(receiver) = auth_receiver.as_ref() {
+                match receiver.try_recv() {
+                    Ok(code) => {
+                        Self::send_auth_2fa(channel, &code)?;
+                        self.state = SessionState::RetryingPeer2FA;
+                        self.notify_auth_event(AUTH_EVENT_REQUIRED, "2FA code submitted");
+                        last_variant = "auth_2fa_submitted".to_string();
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        self.state =
+                            SessionState::Error("2FA submission channel closed".to_string());
+                        break Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "2FA submission channel closed",
+                        ));
+                    }
+                }
+            }
+
+            let response_payload = match channel.recv() {
+                Ok(payload) => payload,
+                Err(err)
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(err) => {
+                    break Err(io::Error::new(
+                        err.kind(),
+                        format!("login response read failed after encrypted LoginRequest: {err}"),
+                    ));
+                }
+            };
+            let response: Message = match protobuf::parse_from_bytes(&response_payload) {
+                Ok(message) => message,
+                Err(err) => {
+                    break Err(io::Error::new(io::ErrorKind::InvalidData, err));
+                }
+            };
+
+            match response.union {
+                Some(Message_oneof_union::login_response(resp)) => {
+                    if resp.has_error() {
+                        let err = resp.get_error().to_string();
+                        if err == NO_PASSWORD_ACCESS {
+                            // 官方被控端语义：approve_mode 为“点击批准(Click)”
+                            // 或“密码+点击(Both)”时，即使设置了设备密码，空密码
+                            // 的批准请求也会先返回 No Password Access，同时弹出
+                            // 批准框并保持连接存活（server/connection.rs
+                            // return true），直到被控端用户点击“接受”后才发送
+                            // LoginResponse OK。因此这里必须继续等待，不能当终态。
+                            // 官方 viewer 对该串的映射也是 wait-remote-accept-nook
+                            // （“请等待远端接受你的会话请求”）。仅在 90s 超时后
+                            // 才按“远端未批准”失败，避免 UI 无限转圈。
+                            if request_approval {
+                                self.state = SessionState::WaitingRemoteApproval;
+                                last_variant = "no_password_access".to_string();
+                                continue;
+                            }
+                            // 非批准模式（密码连接）收到该串：被控端是点击批准
+                            // 模式，密码本身不参与鉴权，必须改用“请求批准”流程。
+                            self.state = SessionState::Error(err.clone());
+                            last_variant = "no_password_access".to_string();
+                            break Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                format!("{}", err),
+                            ));
+                        }
+                        if err == REQUIRE_2FA {
+                            let first_two_factor_challenge = auth_receiver.is_none();
+                            if first_two_factor_challenge {
+                                let (sender, receiver) = mpsc::channel();
+                                crate::register_pending_2fa(
+                                    self.connect_epoch,
+                                    self.connection_id,
+                                    sender,
+                                )?;
+                                auth_receiver = Some(receiver);
+                            }
+                            if first_two_factor_challenge {
+                                deadline = Instant::now() + PEER_2FA_TIMEOUT;
+                            }
+                            self.state = SessionState::WaitingPeer2FA;
+                            self.notify_auth_event(AUTH_EVENT_REQUIRED, REQUIRE_2FA);
+                            last_variant = "2fa_required".to_string();
+                            continue;
+                        }
+                        if err == WRONG_2FA && auth_receiver.is_some() {
+                            self.state = SessionState::WaitingPeer2FA;
+                            self.notify_auth_event(AUTH_EVENT_WRONG_CODE, WRONG_2FA);
+                            last_variant = "2fa_wrong_code".to_string();
+                            continue;
+                        }
+                        self.state = SessionState::Error(err.clone());
+                        break Err(io::Error::new(io::ErrorKind::PermissionDenied, err));
+                    }
+                    if let Some(LoginResponse_oneof_union::peer_info(info)) = resp.union {
+                        self.record_peer_encoding(&info);
+                        self.peer_info = Some(info);
+                    }
+                    if auth_receiver.is_some() {
+                        self.notify_auth_event(AUTH_EVENT_ACCEPTED, "2FA accepted");
+                    }
+                    self.state = SessionState::Connected;
+                    break Ok(());
+                }
+                Some(Message_oneof_union::hash(hash)) if request_approval => {
+                    let fingerprint = Self::challenge_fingerprint(&hash);
+                    let duplicate = last_challenge == Some(fingerprint);
+                    last_challenge = Some(fingerprint);
+                    last_variant = if duplicate {
+                        "duplicate_hash_resend".to_string()
+                    } else {
+                        "approval_hash".to_string()
+                    };
+                    self.state = SessionState::WaitingRemoteApproval;
+                    self.send_login_request(
+                        channel,
+                        peer_id,
+                        password,
+                        &hash,
+                        preferred_codec,
+                        image_quality,
+                        privacy_mode,
+                        audio_enabled,
+                        fps,
+                        file_transfer_dir,
+                        true,
+                    )?;
+                    self.state = SessionState::LoggingIn;
+                }
+                Some(Message_oneof_union::test_delay(test_delay)) => {
+                    last_variant = "test_delay".to_string();
+                    let mut msg = Message::new();
+                    msg.union = Some(Message_oneof_union::test_delay(test_delay));
+                    let payload = msg
+                        .write_to_bytes()
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                    channel.send(&payload)?;
+                }
+                Some(Message_oneof_union::peer_info(info)) => {
+                    last_variant = "peer_info".to_string();
+                    self.record_peer_encoding(&info);
+                    self.peer_info = Some(info);
+                }
+                Some(Message_oneof_union::misc(misc)) => {
+                    last_variant = "misc".to_string();
+                    if let Some(Misc_oneof_union::permission_info(permission)) = misc.union {
+                        eprintln!(
+                            "[RustDesk-FFI] login permission {:?} enabled={}",
+                            permission.get_permission(),
+                            permission.get_enabled()
+                        );
+                        self.login_permissions.push(permission);
+                    }
+                }
+                other => {
+                    last_variant = Self::message_variant_name(&other).to_string();
+                }
+            }
+        };
+        channel.set_read_timeout(None).ok();
+        if result.is_err() && last_variant == "no_password_access" && request_approval {
+            eprintln!("[RustDesk-FFI] waiting for remote approval ended with error");
+        }
+        result
+    }
+
+    fn send_auth_2fa(
+        channel: &mut crate::crypto_channel::CryptoChannel,
+        code: &str,
+    ) -> io::Result<()> {
+        let msg = Self::build_auth_2fa_message(code)?;
+        let payload = msg
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        channel.send(&payload)
+    }
+
+    fn build_auth_2fa_message(code: &str) -> io::Result<Message> {
+        let mut auth = Auth2FA::new();
+        auth.set_code(code.to_string());
+        auth.set_hwid(Vec::new());
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::auth_2fa(auth));
+        Ok(msg)
+    }
+
+    fn challenge_fingerprint(hash: &super::message_proto::Hash) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(hash.get_salt().as_bytes());
+        digest.update([0]);
+        digest.update(hash.get_challenge().as_bytes());
+        digest.finalize().into()
+    }
+
+    fn message_variant_name(union: &Option<Message_oneof_union>) -> &'static str {
+        match union {
+            Some(Message_oneof_union::signed_id(_)) => "signed_id",
+            Some(Message_oneof_union::public_key(_)) => "public_key",
+            Some(Message_oneof_union::test_delay(_)) => "test_delay",
+            Some(Message_oneof_union::video_frame(_)) => "video_frame",
+            Some(Message_oneof_union::login_request(_)) => "login_request",
+            Some(Message_oneof_union::login_response(_)) => "login_response",
+            Some(Message_oneof_union::hash(_)) => "hash",
+            Some(Message_oneof_union::mouse_event(_)) => "mouse_event",
+            Some(Message_oneof_union::audio_frame(_)) => "audio_frame",
+            Some(Message_oneof_union::cursor_data(_)) => "cursor_data",
+            Some(Message_oneof_union::cursor_position(_)) => "cursor_position",
+            Some(Message_oneof_union::cursor_id(_)) => "cursor_id",
+            Some(Message_oneof_union::key_event(_)) => "key_event",
+            Some(Message_oneof_union::clipboard(_)) => "clipboard",
+            Some(Message_oneof_union::file_action(_)) => "file_action",
+            Some(Message_oneof_union::file_response(_)) => "file_response",
+            Some(Message_oneof_union::misc(_)) => "misc",
+            Some(Message_oneof_union::cliprdr(_)) => "cliprdr",
+            Some(Message_oneof_union::message_box(_)) => "message_box",
+            Some(Message_oneof_union::switch_sides_response(_)) => "switch_sides_response",
+            Some(Message_oneof_union::voice_call_request(_)) => "voice_call_request",
+            Some(Message_oneof_union::voice_call_response(_)) => "voice_call_response",
+            Some(Message_oneof_union::peer_info(_)) => "peer_info",
+            Some(Message_oneof_union::pointer_device_event(_)) => "pointer_device_event",
+            Some(Message_oneof_union::auth_2fa(_)) => "auth_2fa",
+            Some(Message_oneof_union::multi_clipboards(_)) => "multi_clipboards",
+            Some(Message_oneof_union::screenshot_request(_)) => "screenshot_request",
+            Some(Message_oneof_union::screenshot_response(_)) => "screenshot_response",
+            Some(Message_oneof_union::terminal_action(_)) => "terminal_action",
+            Some(Message_oneof_union::terminal_response(_)) => "terminal_response",
+            None => "none",
+        }
+    }
+
+    fn handle_login_response(&mut self, resp: LoginResponse) -> io::Result<()> {
+        if resp.has_error() {
+            let err = resp.get_error().to_string();
+            self.state = SessionState::Error(err.clone());
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, err));
+        }
+        if let Some(LoginResponse_oneof_union::peer_info(info)) = resp.union {
+            self.peer_info = Some(info);
+        }
+        self.state = SessionState::Connected;
+        Ok(())
+    }
+
+    fn local_client_id(peer_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"harmonyos-remotedesktop:");
+        hasher.update(peer_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut value = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        value = value % 900_000_000 + 100_000_000;
+        value.to_string()
+    }
+
+    /// 发送 LoginRequest 并等待 LoginResponse (明文 TCP)
+    ///
+    /// stream: 已连接的 TCP stream (来自 Rendezvous 直连或中继)
+    /// my_id: 本端 peer ID
+    /// password: 远程主机密码 (可为空)
+    pub fn login(&mut self, stream: &mut TcpStream, my_id: &str, password: &str) -> io::Result<()> {
+        self.state = SessionState::LoggingIn;
+
+        // 1. 构造 LoginRequest
+        let mut login = LoginRequest::new();
+        login.set_username(my_id.to_string());
+        login.set_password(password.as_bytes().to_vec());
+        login.set_my_id(my_id.to_string());
+        login.set_my_name("HarmonyOS-RemoteDesktop".to_string());
+        login.set_session_id(0); // 服务端会分配
+        login.set_version("2.0.0".to_string());
+        login.set_my_platform("OHOS".to_string());
+        login.set_video_ack_required(VIDEO_ACK_REQUIRED);
+
+        // OptionMessage: 图像质量等
+        let mut opt = OptionMessage::new();
+        opt.set_image_quality(ImageQuality::Balanced);
+        login.option = protobuf::SingularPtrField::some(opt);
+
+        // 2. 包装到 Message
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::login_request(login));
+
+        // 3. 序列化 → wire 帧 → 发送
+        let payload = msg
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        wire::write_frame(stream, &payload)?;
+
+        // 4. 接收响应
+        let response_payload = wire::read_frame(stream)?;
+        let response: Message = protobuf::parse_from_bytes(&response_payload)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // 5. 解析 LoginResponse
+        match response.union {
+            Some(Message_oneof_union::login_response(resp)) => {
+                if resp.has_error() {
+                    let err = resp.get_error().to_string();
+                    self.state = SessionState::Error(err.clone());
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, err));
+                }
+
+                // 提取 PeerInfo
+                if let Some(LoginResponse_oneof_union::peer_info(info)) = resp.union {
+                    self.record_peer_encoding(&info);
+                    self.peer_info = Some(info);
+                }
+
+                self.state = SessionState::Connected;
+                Ok(())
+            }
+            other => {
+                self.state = SessionState::Error(format!("unexpected login response: {:?}", other));
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected login response variant",
+                ))
+            }
+        }
+    }
+
+    /// 主循环: 持续接收消息并分发到回调
+    ///
+    /// 阻塞直到连接关闭或出错。
+    /// on_video_frame: 收到视频帧时调用
+    /// on_audio_frame: 收到音频帧时调用
+    pub fn run_loop<VF, AF>(
+        &mut self,
+        stream: &mut TcpStream,
+        mut on_video_frame: VF,
+        mut on_audio_frame: AF,
+    ) -> io::Result<()>
+    where
+        VF: FnMut(&VideoFrame),
+        AF: FnMut(&AudioFrame),
+    {
+        while self.state == SessionState::Connected {
+            let payload = wire::read_frame(stream)?;
+            let msg: Message = protobuf::parse_from_bytes(&payload)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            match msg.union {
+                Some(Message_oneof_union::video_frame(ref vf)) => {
+                    on_video_frame(vf);
+                }
+                Some(Message_oneof_union::audio_frame(ref af)) => {
+                    on_audio_frame(af);
+                }
+                Some(Message_oneof_union::peer_info(ref info)) => {
+                    self.peer_info = Some(info.clone());
+                }
+                Some(Message_oneof_union::login_response(ref resp)) => {
+                    // 服务端可能重新发送 login response
+                    if resp.has_error() {
+                        // 连接被远端终止
+                        break;
+                    }
+                }
+                _ => {
+                    // 忽略其他消息类型 (clipboard, cursor, etc.)
+                }
+            }
+        }
+
+        self.state = SessionState::Disconnected;
+        Ok(())
+    }
+
+    /// 发送按键事件
+    /// scancode 通过 chr oneof 发送 (Unicode 码点)
+    pub fn send_key_event(
+        &self,
+        stream: &mut TcpStream,
+        _scancode: u32,
+        down: bool,
+    ) -> io::Result<()> {
+        let mut key = KeyEvent::new();
+        key.set_down(down);
+
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::key_event(key));
+
+        let payload = msg
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        wire::write_frame(stream, &payload)
+    }
+
+    /// 发送鼠标事件
+    /// mask: 鼠标按键掩码 (bit 0=left, 1=right, 2=middle)
+    pub fn send_mouse_event(
+        &self,
+        stream: &mut TcpStream,
+        x: i32,
+        y: i32,
+        mask: i32,
+    ) -> io::Result<()> {
+        let mut mouse = MouseEvent::new();
+        mouse.set_x(x);
+        mouse.set_y(y);
+        mouse.set_mask(mask);
+
+        let mut msg = Message::new();
+        msg.union = Some(Message_oneof_union::mouse_event(mouse));
+
+        let payload = msg
+            .write_to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        wire::write_frame(stream, &payload)
+    }
+
+    /// 获取会话状态
+    pub fn state(&self) -> &SessionState {
+        &self.state
+    }
+
+    /// 获取远端信息
+    pub fn peer_info(&self) -> Option<&PeerInfo> {
+        self.peer_info.as_ref()
+    }
+
+    /// Keep the latest peer catalog available to the streaming layer.
+    pub fn update_peer_info(&mut self, peer_info: PeerInfo) {
+        self.peer_info = Some(peer_info);
+    }
+}
+
+struct PendingTwoFactorGuard {
+    epoch: u64,
+    session_id: u64,
+}
+
+impl Drop for PendingTwoFactorGuard {
+    fn drop(&mut self) {
+        crate::clear_pending_2fa(self.epoch, self.session_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protobuf::Message as ProtoMessage;
+
+    #[test]
+    fn file_auth_wire_interleaves_password_totp_and_explicit_approval_on_same_desktop_id() {
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+        let mut clients = Vec::new();
+        let mut peers = Vec::new();
+        let mut auths = Vec::new();
+        for approval in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            peers.push(thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(4)))
+                    .unwrap();
+                let send = |socket: &mut TcpStream, message: Message| {
+                    wire::write_frame(socket, &message.write_to_bytes().unwrap()).unwrap()
+                };
+                let error = |socket: &mut TcpStream, text: &str| {
+                    let mut response = LoginResponse::new();
+                    response.set_error(text.to_owned());
+                    let mut message = Message::new();
+                    message.set_login_response(response);
+                    send(socket, message);
+                };
+                let read = |socket: &mut TcpStream| -> Message {
+                    protobuf::parse_from_bytes(&wire::read_frame(socket).unwrap()).unwrap()
+                };
+                let mut hash = super::super::message_proto::Hash::new();
+                hash.set_salt("salt".into());
+                hash.set_challenge("challenge".into());
+                let mut challenge = Message::new();
+                challenge.set_hash(hash);
+                send(&mut socket, challenge.clone());
+                let first = read(&mut socket);
+                assert!(first.get_login_request().has_file_transfer());
+                if approval {
+                    error(&mut socket, "No Password Access");
+                    let request = read(&mut socket);
+                    assert!(request.get_login_request().get_password().is_empty());
+                    error(&mut socket, "No Password Access");
+                    send(&mut socket, challenge);
+                    let retry = read(&mut socket);
+                    assert!(retry.get_login_request().has_file_transfer());
+                    assert!(retry.get_login_request().get_password().is_empty());
+                } else {
+                    error(&mut socket, "Wrong Password");
+                    let retry = read(&mut socket);
+                    assert!(!retry.get_login_request().get_password().is_empty());
+                    assert_ne!(
+                        retry.get_login_request().get_password(),
+                        first.get_login_request().get_password()
+                    );
+                    error(&mut socket, "2FA Required");
+                    assert_eq!(read(&mut socket).get_auth_2fa().get_code(), "123456");
+                    error(&mut socket, "Wrong 2FA Code");
+                    assert_eq!(read(&mut socket).get_auth_2fa().get_code(), "654321");
+                }
+                let mut response = LoginResponse::new();
+                response.set_peer_info(PeerInfo::new());
+                let mut message = Message::new();
+                message.set_login_response(response);
+                send(&mut socket, message);
+            }));
+            let auth = Arc::new(crate::file_auth::FileAuthExchange::new(if approval {
+                202
+            } else {
+                201
+            }));
+            auths.push(auth.clone());
+            clients.push(thread::spawn(move || {
+                let socket = TcpStream::connect(address).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut channel = crate::crypto_channel::CryptoChannel::new_plain(socket);
+                let reservation = crate::ConnectEpochReservation::new(7700201);
+                let mut session = Session::new_with_connection_id(7700201, reservation.epoch());
+                session.set_file_auth(auth.clone());
+                session
+                    .login_file_transfer_encrypted(&mut channel, "peer", "original", "/home", false)
+                    .unwrap();
+                assert_eq!(session.state(), &SessionState::Connected);
+                assert_eq!(auth.snapshot().state, 3);
+            }));
+        }
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut seen = [0u64; 2];
+        let mut totp_attempt = 0;
+        loop {
+            let mut complete = 0;
+            for (index, auth) in auths.iter().enumerate() {
+                let snapshot = auth.snapshot();
+                if snapshot.state == 3 {
+                    complete += 1;
+                }
+                if snapshot.state == 1 && snapshot.kind != 4 && snapshot.challenge_id != seen[index]
+                {
+                    seen[index] = snapshot.challenge_id;
+                    let secret = match snapshot.kind {
+                        1 => "temporary-password",
+                        2 => {
+                            totp_attempt += 1;
+                            if totp_attempt == 1 {
+                                "123456"
+                            } else {
+                                "654321"
+                            }
+                        }
+                        3 => "",
+                        _ => panic!("unexpected challenge"),
+                    };
+                    assert!(!auths[1 - index].submit(snapshot.challenge_id, snapshot.kind, secret));
+                    assert!(auth.submit(snapshot.challenge_id, snapshot.kind, secret));
+                }
+            }
+            if complete == 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "file authentication timed out");
+            thread::sleep(Duration::from_millis(1));
+        }
+        for client in clients {
+            client.join().unwrap();
+        }
+        for peer in peers {
+            peer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn native_login_contract_does_not_request_per_frame_video_ack() {
+        let mut login = LoginRequest::new();
+        login.set_video_ack_required(VIDEO_ACK_REQUIRED);
+
+        assert!(!login.get_video_ack_required());
+    }
+
+    #[test]
+    fn refresh_video_message_keeps_refresh_video_oneof_variant() {
+        let encoded = Session::build_refresh_video_message()
+            .write_to_bytes()
+            .expect("refresh message should serialize");
+        let decoded: Message =
+            protobuf::parse_from_bytes(&encoded).expect("refresh message should deserialize");
+
+        match decoded.union {
+            Some(Message_oneof_union::misc(misc)) => match misc.union {
+                Some(Misc_oneof_union::refresh_video(value)) => assert!(value),
+                other => panic!("unexpected Misc oneof variant: {:?}", other),
+            },
+            other => panic!("unexpected Message variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_2fa_message_uses_official_message_variant() {
+        let encoded = Session::build_auth_2fa_message("123456")
+            .expect("2FA message should be built")
+            .write_to_bytes()
+            .expect("2FA message should serialize");
+        let decoded: Message =
+            protobuf::parse_from_bytes(&encoded).expect("2FA message should deserialize");
+        match decoded.union {
+            Some(Message_oneof_union::auth_2fa(auth)) => {
+                assert_eq!(auth.get_code(), "123456");
+                assert!(auth.get_hwid().is_empty());
+            }
+            other => panic!("unexpected Message variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn live_fps_cap_message_carries_only_custom_fps() {
+        let encoded = Session::build_custom_fps_message(30)
+            .write_to_bytes()
+            .expect("fps message should serialize");
+        let decoded: Message =
+            protobuf::parse_from_bytes(&encoded).expect("fps message should deserialize");
+        match decoded.union {
+            Some(Message_oneof_union::misc(misc)) => match misc.union {
+                Some(Misc_oneof_union::option(option)) => {
+                    assert_eq!(option.get_custom_fps(), 30);
+                    assert_eq!(option.get_image_quality(), ImageQuality::NotSet);
+                    assert!(!option.has_supported_decoding());
+                }
+                other => panic!("unexpected misc payload: {:?}", other),
+            },
+            other => panic!("unexpected message: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn live_best_quality_uses_official_best_image_quality_enum() {
+        let encoded = Session::build_image_quality_message(2)
+            .write_to_bytes()
+            .expect("image-quality message should serialize");
+        let decoded: Message =
+            protobuf::parse_from_bytes(&encoded).expect("image-quality message should deserialize");
+        match decoded.union {
+            Some(Message_oneof_union::misc(misc)) => match misc.union {
+                Some(Misc_oneof_union::option(option)) => {
+                    assert_eq!(option.get_image_quality(), ImageQuality::Best);
+                }
+                other => panic!("unexpected Misc oneof variant: {:?}", other),
+            },
+            other => panic!("unexpected Message variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn codec_evidence_matches_serialized_login_and_runtime_messages() {
+        use std::net::{TcpListener, TcpStream};
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            for preference in 0..=5 {
+                for login in [true, false] {
+                    let bytes = wire::read_frame(&mut stream).unwrap();
+                    let message: Message = protobuf::parse_from_bytes(&bytes).unwrap();
+                    let decoding = if login {
+                        message.get_login_request().get_option().get_supported_decoding()
+                    } else {
+                        message.get_misc().get_option().get_supported_decoding()
+                    };
+                    assert_eq!(decoding, &Session::supported_decoding(preference));
+                }
+            }
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut channel = crate::crypto_channel::CryptoChannel::new_plain(stream);
+        let session = Session::new_with_connection_id(0, 0);
+        for preference in 0..=5 {
+            session.send_login_request(&mut channel, "test-peer", "", &super::super::message_proto::Hash::new(),
+                preference, 1, false, false, 30, None, false).unwrap();
+            session.send_runtime_options(&mut channel, preference, 1, false, false, Some(30)).unwrap();
+            let evidence = *session.codec_evidence.lock().unwrap();
+            assert_eq!(evidence.requested_preference, preference);
+            assert_eq!(evidence.sent_preference, if preference == 0 { 4 } else { preference });
+            assert_eq!(evidence.login_sends, preference as u64 + 1);
+            assert_eq!(evidence.option_sends, preference as u64 + 1);
+        }
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn h265_connection_preference_is_sent_as_h265() {
+        let decoding = Session::supported_decoding(5);
+
+        assert_eq!(decoding.get_prefer(), SupportedDecoding_PreferCodec::H265);
+        assert_eq!(decoding.get_ability_h265(), 1);
+        assert_eq!(decoding.get_ability_h264(), 1);
+    }
+
+    #[test]
+    fn automatic_connection_preference_remains_the_compatibility_default() {
+        let decoding = Session::supported_decoding(0);
+
+        assert_eq!(decoding.get_prefer(), SupportedDecoding_PreferCodec::H264);
+        assert_eq!(decoding.get_ability_h264(), 1);
+        assert_eq!(decoding.get_ability_h265(), 1);
+    }
+}

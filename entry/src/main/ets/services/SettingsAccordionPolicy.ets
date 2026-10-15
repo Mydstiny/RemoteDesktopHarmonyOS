@@ -1,0 +1,139 @@
+export const SETTINGS_SECTION_NONE: string = '';
+export const SETTINGS_SECTION_APPEARANCE: string = 'appearance';
+export const SETTINGS_SECTION_HOME: string = 'homeLayout';
+export const SETTINGS_SECTION_CLOUD_SYNC: string = 'cloudSync';
+export const SETTINGS_SECTION_CONNECTION_LIVE: string = 'connectionLive';
+export const SETTINGS_SECTION_DISPLAY_INTERACTION: string = 'displayInteraction';
+export const SETTINGS_SECTION_VIRTUAL_KEYBOARD: string = 'virtualKeyboard';
+export const SETTINGS_SECTION_RDP: string = 'windowsRdp';
+export const SETTINGS_SECTION_RUSTDESK: string = 'rustdesk';
+export const SETTINGS_SECTION_SSH: string = 'ssh';
+export const SETTINGS_SECTION_VNC: string = 'vnc';
+export const SETTINGS_SECTION_MOONLIGHT: string = 'moonlight';
+export const SETTINGS_SECTION_SECURITY: string = 'security';
+export const SETTINGS_SECTION_TUTORIAL: string = 'tutorial';
+/** 诊断日志: 传统日志抓取. */
+export const SETTINGS_SECTION_DIAGNOSTICS: string = 'diagnostics';
+export const SETTINGS_SECTION_ABOUT: string = 'about';
+export const SETTINGS_SECTION_RATING: string = 'rating';
+
+export const SETTINGS_VNC_ACTION_ROW_COUNT: number = 11;
+export const SETTINGS_MOONLIGHT_ACTION_ROW_COUNT: number = 7;
+export const SETTINGS_RDP_SWITCH_ROW_COUNT: number = 6;
+export const SETTINGS_SECURITY_ACTION_ROW_COUNT: number = 5;
+const SETTINGS_VNC_ACTION_ROW_HEIGHT_VP: number = 62;
+const SETTINGS_VNC_ACTION_DIVIDER_HEIGHT_VP: number = 0.5;
+const SETTINGS_VNC_SECTION_CHROME_HEIGHT_VP: number = 73;
+const SETTINGS_RDP_DESKTOP_PRESET_HEIGHT_VP: number = 110;
+/** 远端显示方案 replaces the desktop-size and remote-scale rows with one entry. */
+const SETTINGS_RDP_DISPLAY_PROFILE_ROW_HEIGHT_VP: number = 64;
+const SETTINGS_RDP_INLINE_SELECTOR_HEIGHT_VP: number = 64;
+const SETTINGS_RDP_STACKED_SELECTOR_HEIGHT_VP: number = 92;
+const SETTINGS_RDP_SELECTOR_ROW_COUNT: number = 4;
+const SETTINGS_RDP_FIXED_ROW_COUNT: number = 2;
+const SETTINGS_RDP_FIXED_ROW_HEIGHT_VP: number = 64;
+const SETTINGS_SECURITY_FIXED_CONTENT_HEIGHT_VP: number = 228;
+const SETTINGS_SECURITY_FIXED_ROW_COUNT: number = 3;
+
+export const SETTINGS_APP_BUNDLE_NAME: string = 'com.example.remotedesktop';
+export const SETTINGS_RATING_SUBTITLE: string = '前往应用市场为 RemoteDesktop 评分';
+export const SETTINGS_APPGALLERY_REVIEW_ACTION: string = 'ohos.want.action.appdetail';
+export const SETTINGS_BROWSER_VIEW_ACTION: string = 'ohos.want.action.viewData';
+
+export type SettingsActionKind = 'none' | 'rating';
+
+export function settingsSectionIsAction(section: string): boolean {
+  return section === SETTINGS_SECTION_RATING;
+}
+
+export function settingsActionKind(section: string): SettingsActionKind {
+  if (section === SETTINGS_SECTION_RATING) {
+    return 'rating';
+  }
+  return 'none';
+}
+
+export function settingsNextExpandedSection(current: string, selected: string): string {
+  if (settingsSectionIsAction(selected)) {
+    return current;
+  }
+  return current === selected ? SETTINGS_SECTION_NONE : selected;
+}
+
+export function settingsVncExpandedMaxHeight(actionRowCount: number = SETTINGS_VNC_ACTION_ROW_COUNT): number {
+  const boundedCount: number = Number.isFinite(actionRowCount) ? Math.max(0, Math.floor(actionRowCount)) : 0;
+  const dividerCount: number = Math.max(0, boundedCount - 1);
+  return Math.ceil(SETTINGS_VNC_SECTION_CHROME_HEIGHT_VP +
+    boundedCount * SETTINGS_VNC_ACTION_ROW_HEIGHT_VP +
+    dividerCount * SETTINGS_VNC_ACTION_DIVIDER_HEIGHT_VP);
+}
+
+export function settingsMoonlightExpandedMaxHeight(
+  actionRowCount: number = SETTINGS_MOONLIGHT_ACTION_ROW_COUNT
+): number {
+  const boundedCount: number = Number.isFinite(actionRowCount) ?
+    Math.max(0, Math.floor(actionRowCount)) : 0;
+  const dividerCount: number = Math.max(0, boundedCount - 1);
+  return Math.ceil(SETTINGS_VNC_SECTION_CHROME_HEIGHT_VP +
+    boundedCount * SETTINGS_VNC_ACTION_ROW_HEIGHT_VP +
+    dividerCount * SETTINGS_VNC_ACTION_DIVIDER_HEIGHT_VP);
+}
+
+/**
+ * RDP uses taller, stacked selector rows outside the medium/large layouts.
+ * Keep the animation cap aligned with every rendered row so clip(true) only
+ * hides the collapsed state and never removes the card's bottom spacing.
+ */
+export function settingsRdpExpandedMaxHeight(
+  breakpoint: string,
+  switchRowCount: number = SETTINGS_RDP_SWITCH_ROW_COUNT,
+  proDisplayProfile: boolean = false
+): number {
+  // 远端显示方案: one entry row instead of the desktop-size chips and the remote-scale selector.
+  const selectorRows: number = proDisplayProfile ? SETTINGS_RDP_SELECTOR_ROW_COUNT - 1 : SETTINGS_RDP_SELECTOR_ROW_COUNT;
+  const leadHeight: number = proDisplayProfile ? SETTINGS_RDP_DISPLAY_PROFILE_ROW_HEIGHT_VP :
+    SETTINGS_RDP_DESKTOP_PRESET_HEIGHT_VP;
+  const boundedSwitchCount: number = Number.isFinite(switchRowCount) ?
+    Math.max(0, Math.floor(switchRowCount)) : 0;
+  const selectorHeight: number = breakpoint === 'md' || breakpoint === 'lg' ?
+    SETTINGS_RDP_INLINE_SELECTOR_HEIGHT_VP : SETTINGS_RDP_STACKED_SELECTOR_HEIGHT_VP;
+  const itemCount: number = 1 + selectorRows +
+    boundedSwitchCount + SETTINGS_RDP_FIXED_ROW_COUNT;
+  const dividerCount: number = Math.max(0, itemCount - 1);
+  return Math.ceil(SETTINGS_VNC_SECTION_CHROME_HEIGHT_VP +
+    leadHeight +
+    selectorRows * selectorHeight +
+    boundedSwitchCount * SETTINGS_RDP_FIXED_ROW_HEIGHT_VP +
+    SETTINGS_RDP_FIXED_ROW_COUNT * SETTINGS_RDP_FIXED_ROW_HEIGHT_VP +
+    dividerCount * SETTINGS_VNC_ACTION_DIVIDER_HEIGHT_VP);
+}
+
+/** Data Security combines three custom blocks with its action rows. */
+export function settingsSecurityExpandedMaxHeight(
+  actionRowCount: number = SETTINGS_SECURITY_ACTION_ROW_COUNT
+): number {
+  const boundedActionCount: number = Number.isFinite(actionRowCount) ?
+    Math.max(0, Math.floor(actionRowCount)) : 0;
+  const itemCount: number = SETTINGS_SECURITY_FIXED_ROW_COUNT + boundedActionCount;
+  const dividerCount: number = Math.max(0, itemCount - 1);
+  return Math.ceil(SETTINGS_VNC_SECTION_CHROME_HEIGHT_VP +
+    SETTINGS_SECURITY_FIXED_CONTENT_HEIGHT_VP +
+    boundedActionCount * SETTINGS_VNC_ACTION_ROW_HEIGHT_VP +
+    dividerCount * SETTINGS_VNC_ACTION_DIVIDER_HEIGHT_VP);
+}
+
+export function settingsRatingUriCandidates(): string[] {
+  return [
+    'store://appgallery.huawei.com/app/detail?id=' + SETTINGS_APP_BUNDLE_NAME + '&action=write-review',
+    'appmarket://comment?packageName=' + SETTINGS_APP_BUNDLE_NAME,
+    'appmarket://details?id=' + SETTINGS_APP_BUNDLE_NAME,
+    'market://details?id=' + SETTINGS_APP_BUNDLE_NAME
+  ];
+}
+
+export function settingsRatingWantAction(uri: string): string {
+  if (uri.indexOf('store://appgallery.huawei.com/app/detail') === 0) {
+    return SETTINGS_APPGALLERY_REVIEW_ACTION;
+  }
+  return SETTINGS_BROWSER_VIEW_ACTION;
+}

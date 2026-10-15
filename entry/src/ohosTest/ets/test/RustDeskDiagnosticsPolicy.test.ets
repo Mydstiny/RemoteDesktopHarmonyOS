@@ -1,0 +1,138 @@
+import { describe, it, expect } from '@ohos/hypium';
+import {
+  formatDiagnosticBitrate,
+  formatDiagnosticBytes,
+  formatDiagnosticDurationUs,
+  formatDiagnosticFrameRate,
+  formatDiagnosticLatency,
+  formatDiagnosticRate,
+  resolveRustDeskProDiagnosticsToggle,
+  rustDeskDiagnosticsStreamState,
+  rustDeskCodecAlignment,
+  rustDeskCodecConfigValue,
+  rustDeskCodecForPreference,
+  rustDeskCodecLabel,
+  rustDeskCodecPreferenceLabel,
+  shouldEnableRustDeskPro,
+  shouldShowSessionDiagnostics,
+  shouldShowRustDeskDiagnostics
+} from '../../../main/ets/services/RustDeskDiagnosticsPolicy';
+
+export default function rustDeskDiagnosticsPolicyTest(): void {
+  describe('RustDeskDiagnosticsPolicy', (): void => {
+    it('diagnostics_requires_a_connected_rustdesk_session', 0, (): void => {
+      expect(shouldShowRustDeskDiagnostics(false, true, 'rustdesk', 1)).assertEqual(false);
+      expect(shouldShowRustDeskDiagnostics(true, false, 'rustdesk', 1)).assertEqual(false);
+      expect(shouldShowRustDeskDiagnostics(true, true, 'rdp', 1)).assertEqual(false);
+      expect(shouldShowRustDeskDiagnostics(true, true, 'rustdesk', 1)).assertEqual(true);
+    });
+
+    it('generic_session_diagnostics_accepts_vnc_without_accepting_rdp', 0, (): void => {
+      expect(shouldShowSessionDiagnostics(false, true, 'vnc', 1)).assertEqual(false);
+      expect(shouldShowSessionDiagnostics(true, false, 'vnc', 1)).assertEqual(false);
+      expect(shouldShowSessionDiagnostics(true, true, 'rdp', 1)).assertEqual(false);
+      expect(shouldShowSessionDiagnostics(true, true, 'vnc', 1)).assertEqual(true);
+      expect(shouldShowSessionDiagnostics(true, true, 'vnc', 0)).assertEqual(false);
+    });
+
+    it('pro_is_active_only_with_basic_diagnostics', 0, (): void => {
+      expect(shouldEnableRustDeskPro(false, true)).assertEqual(false);
+      expect(shouldEnableRustDeskPro(true, false)).assertEqual(false);
+      expect(shouldEnableRustDeskPro(true, true)).assertEqual(true);
+    });
+
+    it('enabling_pro_also_enables_the_base_monitor', 0, (): void => {
+      const enabled = resolveRustDeskProDiagnosticsToggle(false, false, true);
+      expect(enabled.showDiagnostics).assertEqual(true);
+      expect(enabled.showProDiagnostics).assertEqual(true);
+
+      const disabled = resolveRustDeskProDiagnosticsToggle(true, true, false);
+      expect(disabled.showDiagnostics).assertEqual(true);
+      expect(disabled.showProDiagnostics).assertEqual(false);
+    });
+
+    it('formats_unavailable_and_rate_boundaries_without_nan', 0, (): void => {
+      expect(formatDiagnosticRate(0)).assertEqual('—');
+      expect(formatDiagnosticRate(NaN)).assertEqual('—');
+      expect(formatDiagnosticRate(Infinity)).assertEqual('—');
+      expect(formatDiagnosticLatency(-1)).assertEqual('—');
+      expect(formatDiagnosticBitrate(999)).assertEqual('999 Kbps');
+      expect(formatDiagnosticBitrate(1000)).assertEqual('1.0 Mbps');
+      expect(formatDiagnosticBytes(0)).assertEqual('—');
+      expect(formatDiagnosticDurationUs(0)).assertEqual('—');
+    });
+
+    it('keeps_video_sampling_stall_and_unavailable_states_distinct', 0, (): void => {
+      expect(formatDiagnosticFrameRate(0, false, false, false)).assertEqual('等待视频流');
+      expect(formatDiagnosticFrameRate(0, false, true, false)).assertEqual('采样中');
+      expect(formatDiagnosticFrameRate(0, false, true, true)).assertEqual('静止 / 待更新');
+      expect(formatDiagnosticFrameRate(0, true, true, true)).assertEqual('静止 / 待更新');
+      expect(formatDiagnosticFrameRate(0, true, true, false)).assertEqual('0.0');
+      expect(rustDeskDiagnosticsStreamState(false, -1)).assertEqual('等待视频流');
+      expect(rustDeskDiagnosticsStreamState(true, 2999)).assertEqual('正在接收');
+      expect(rustDeskDiagnosticsStreamState(true, 3000)).assertEqual('画面静止或停滞');
+    });
+
+    it('uses_the_public_codec_numbering_for_hud_labels', 0, (): void => {
+      expect(rustDeskCodecLabel(0)).assertEqual('H264');
+      expect(rustDeskCodecLabel(1)).assertEqual('H265');
+      expect(rustDeskCodecLabel(2)).assertEqual('VP8');
+      expect(rustDeskCodecLabel(3)).assertEqual('VP9');
+      expect(rustDeskCodecLabel(4)).assertEqual('AV1');
+      expect(rustDeskCodecLabel(-1)).assertEqual('—');
+    });
+
+    it('keeps_preference_numbering_distinct_from_actual_frame_numbering', 0, (): void => {
+      expect(rustDeskCodecPreferenceLabel(0)).assertEqual('自动');
+      expect(rustDeskCodecPreferenceLabel(1)).assertEqual('VP8');
+      expect(rustDeskCodecPreferenceLabel(2)).assertEqual('VP9');
+      expect(rustDeskCodecPreferenceLabel(3)).assertEqual('AV1');
+      expect(rustDeskCodecPreferenceLabel(4)).assertEqual('H264');
+      expect(rustDeskCodecPreferenceLabel(5)).assertEqual('H265');
+      expect(rustDeskCodecForPreference(1)).assertEqual(2);
+      expect(rustDeskCodecForPreference(2)).assertEqual(3);
+      expect(rustDeskCodecForPreference(3)).assertEqual(4);
+      expect(rustDeskCodecForPreference(4)).assertEqual(0);
+      expect(rustDeskCodecForPreference(5)).assertEqual(1);
+    });
+
+    it('projects_every_codec_preference_into_the_native_connection_contract', 0, (): void => {
+      expect(rustDeskCodecConfigValue(0)).assertEqual('');
+      expect(rustDeskCodecConfigValue(1)).assertEqual('VP8');
+      expect(rustDeskCodecConfigValue(2)).assertEqual('VP9');
+      expect(rustDeskCodecConfigValue(3)).assertEqual('AV1');
+      expect(rustDeskCodecConfigValue(4)).assertEqual('H264');
+      expect(rustDeskCodecConfigValue(5)).assertEqual('H265');
+      expect(rustDeskCodecConfigValue(-1)).assertEqual('');
+      expect(rustDeskCodecConfigValue(6)).assertEqual('');
+    });
+
+    it('reports_preference_and_actual_codec_alignment_without_faking_live_apply', 0, (): void => {
+      const waiting = rustDeskCodecAlignment(5, -1, false);
+      expect(waiting.preference).assertEqual('H265');
+      expect(waiting.actual).assertEqual('等待视频流');
+      expect(waiting.aligned).assertFalse();
+
+      const automatic = rustDeskCodecAlignment(0, 3, true);
+      expect(automatic.actual).assertEqual('VP9');
+      expect(automatic.state).assertEqual('自动协商');
+      expect(automatic.aligned).assertTrue();
+
+      const aligned = rustDeskCodecAlignment(5, 1, true);
+      expect(aligned.state).assertEqual('偏好与实际流已对齐');
+      expect(aligned.aligned).assertTrue();
+
+      const pendingReconnect = rustDeskCodecAlignment(5, 0, true);
+      expect(pendingReconnect.preference).assertEqual('H265');
+      expect(pendingReconnect.actual).assertEqual('H264');
+      expect(pendingReconnect.state).assertEqual('偏好与实际流不同，协商证据不可用');
+      expect(rustDeskCodecAlignment(5, 0, true, { connectionCodecPreference: 5,
+        sentCodecPreference: 5 }).state).assertEqual('偏好已发送，对端返回其他编码');
+      expect(rustDeskCodecAlignment(5, 0, true, { connectionCodecPreference: 4,
+        sentCodecPreference: 4 }).state).assertEqual('设置已更改，待重连应用');
+      expect(rustDeskCodecAlignment(5, 0, true, { connectionCodecPreference: 5,
+        sentCodecPreference: -1, codecOptionSendFailures: 1 }).state).assertEqual('编码偏好发送失败');
+      expect(pendingReconnect.aligned).assertFalse();
+    });
+  });
+}

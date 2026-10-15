@@ -1,0 +1,232 @@
+/**
+ * remote_cursor_snapshot.cpp — validated remote cursor snapshot storage
+ */
+
+#include "remote_cursor_snapshot.h"
+
+#include <array>
+#include <utility>
+
+namespace {
+
+constexpr int kDefaultCursorSize = 16;
+constexpr uint64_t kDefaultCursorShapeId = 0x72656D6F74656466ULL;
+
+std::vector<uint8_t> defaultCursorRgba() {
+    // Small black-outline/white-fill arrow. The hotspot is its top-left tip.
+    static constexpr std::array<const char*, kDefaultCursorSize> kRows = {
+        "b...............",
+        "bb..............",
+        "bwb.............",
+        "bwwb............",
+        "bwwwb...........",
+        "bwwwwb..........",
+        "bwwwwwb.........",
+        "bwwwwwwb........",
+        "bwwwwwwwb.......",
+        "bwwwwwwwwb......",
+        "bwwwwwwwwwb.....",
+        "bwwwwwwwwwwb....",
+        "bwwwwwwwwwwwb...",
+        "bwwwwwwwwwwwwb..",
+        "bwwwwwwwwwwwwwb.",
+        "bbbbbbbbbbbbbbbb"
+    };
+    std::vector<uint8_t> rgba(static_cast<size_t>(kDefaultCursorSize) *
+                              static_cast<size_t>(kDefaultCursorSize) * 4U, 0);
+    for (int y = 0; y < kDefaultCursorSize; ++y) {
+        for (int x = 0; x < kDefaultCursorSize; ++x) {
+            const char pixel = kRows[static_cast<size_t>(y)][x];
+            if (pixel == '.') {
+                continue;
+            }
+            const size_t offset = (static_cast<size_t>(y) * kDefaultCursorSize +
+                                   static_cast<size_t>(x)) * 4U;
+            if (pixel == 'b') {
+                rgba[offset] = 0;
+                rgba[offset + 1] = 0;
+                rgba[offset + 2] = 0;
+            } else {
+                rgba[offset] = 255;
+                rgba[offset + 1] = 255;
+                rgba[offset + 2] = 255;
+            }
+            rgba[offset + 3] = 255;
+        }
+    }
+    return rgba;
+}
+
+} // namespace
+
+void RemoteCursorStore::reset(uint64_t sessionId, const std::string& protocol,
+                              uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_ = RemoteCursorSnapshot{};
+    state_.sessionId = sessionId;
+    state_.generation = generation == 0 ? sessionId : generation;
+    state_.protocol = protocol;
+    state_.shapeSource = "none";
+}
+
+void RemoteCursorStore::setGeneration(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_.generation = generation;
+}
+
+bool RemoteCursorStore::setShape(uint64_t shapeId, int width, int height, int hotX, int hotY,
+                                 const std::vector<uint8_t>& rgba) {
+    return setShapeInternal(shapeId, width, height, hotX, hotY, rgba, false, true, "protocol");
+}
+
+bool RemoteCursorStore::setShapeIfGeneration(uint64_t generation, uint64_t shapeId, int width,
+                                             int height, int hotX, int hotY,
+                                             const std::vector<uint8_t>& rgba) {
+    if (generation == 0) {
+        return false;
+    }
+    return setShapeInternal(shapeId, width, height, hotX, hotY, rgba, false, true, "protocol",
+                            generation);
+}
+
+bool RemoteCursorStore::setShapeInternal(uint64_t shapeId, int width, int height, int hotX,
+                                         int hotY, const std::vector<uint8_t>& rgba,
+                                         bool fallbackShape, bool protocolShapeAvailable,
+                                         const char* shapeSource, uint64_t expectedGeneration) {
+    if (width <= 0 || height <= 0 || width > kRemoteCursorMaxDimension ||
+        height > kRemoteCursorMaxDimension || hotX < 0 || hotY < 0 || hotX >= width ||
+        hotY >= height) {
+        return false;
+    }
+
+    const size_t pixelBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4U;
+    if (pixelBytes > kRemoteCursorMaxBytes || rgba.size() != pixelBytes) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (expectedGeneration != 0 && state_.generation != expectedGeneration) {
+        return false;
+    }
+    if (state_.shapeId == shapeId && state_.width == width && state_.height == height &&
+        state_.hotX == hotX && state_.hotY == hotY &&
+        state_.fallbackShape == fallbackShape &&
+        state_.protocolShapeAvailable == protocolShapeAvailable &&
+        state_.shapeSource == (shapeSource ? shapeSource : "none") && state_.rgba == rgba) {
+        return true;
+    }
+
+    state_.shapeId = shapeId;
+    state_.width = width;
+    state_.height = height;
+    state_.hotX = hotX;
+    state_.hotY = hotY;
+    state_.fallbackShape = fallbackShape;
+    state_.protocolShapeAvailable = protocolShapeAvailable;
+    state_.shapeSource = shapeSource ? shapeSource : "none";
+    state_.rgba = rgba;
+    state_.shapeRevision += 1;
+    return true;
+}
+
+bool RemoteCursorStore::setDefaultShape() {
+    return setShapeInternal(kDefaultCursorShapeId, kDefaultCursorSize, kDefaultCursorSize, 0,
+                            0, defaultCursorRgba(), false, false, "default");
+}
+
+bool RemoteCursorStore::setDefaultShapeIfGeneration(uint64_t generation) {
+    if (generation == 0) {
+        return false;
+    }
+    return setShapeInternal(kDefaultCursorShapeId, kDefaultCursorSize, kDefaultCursorSize, 0,
+                            0, defaultCursorRgba(), false, false, "default", generation);
+}
+
+bool RemoteCursorStore::setFallbackShape() {
+    return setShapeInternal(kDefaultCursorShapeId, kDefaultCursorSize, kDefaultCursorSize, 0,
+                            0, defaultCursorRgba(), true, false, "fallback");
+}
+
+void RemoteCursorStore::setPosition(int x, int y) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.positionAvailable && state_.x == x && state_.y == y) {
+        return;
+    }
+    state_.x = x;
+    state_.y = y;
+    state_.positionAvailable = true;
+    state_.positionRevision += 1;
+}
+
+bool RemoteCursorStore::setPositionIfGeneration(uint64_t generation, int x, int y) {
+    if (generation == 0) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.generation != generation) {
+        return false;
+    }
+    if (state_.positionAvailable && state_.x == x && state_.y == y) {
+        return true;
+    }
+    state_.x = x;
+    state_.y = y;
+    state_.positionAvailable = true;
+    state_.positionRevision += 1;
+    return true;
+}
+
+void RemoteCursorStore::setVisible(bool visible) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.visible == visible) {
+        return;
+    }
+    state_.visible = visible;
+    state_.visibilityRevision += 1;
+}
+
+bool RemoteCursorStore::setVisibleIfGeneration(uint64_t generation, bool visible) {
+    if (generation == 0) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.generation != generation) {
+        return false;
+    }
+    if (state_.visible == visible) {
+        return true;
+    }
+    state_.visible = visible;
+    state_.visibilityRevision += 1;
+    return true;
+}
+
+RemoteCursorSnapshot RemoteCursorStore::snapshot(bool includePixels) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The ArkTS polling path asks for metadata on every tick and requests
+    // pixels only when shapeRevision changes. Do not copy the potentially
+    // 384x384 RGBA buffer for metadata-only snapshots.
+    RemoteCursorSnapshot result;
+    result.sessionId = state_.sessionId;
+    result.generation = state_.generation;
+    result.protocol = state_.protocol;
+    result.shapeId = state_.shapeId;
+    result.shapeSource = state_.shapeSource;
+    result.x = state_.x;
+    result.y = state_.y;
+    result.width = state_.width;
+    result.height = state_.height;
+    result.hotX = state_.hotX;
+    result.hotY = state_.hotY;
+    result.fallbackShape = state_.fallbackShape;
+    result.protocolShapeAvailable = state_.protocolShapeAvailable;
+    result.visible = state_.visible;
+    result.positionAvailable = state_.positionAvailable;
+    result.shapeRevision = state_.shapeRevision;
+    result.positionRevision = state_.positionRevision;
+    result.visibilityRevision = state_.visibilityRevision;
+    if (includePixels) {
+        result.rgba = state_.rgba;
+    }
+    return result;
+}

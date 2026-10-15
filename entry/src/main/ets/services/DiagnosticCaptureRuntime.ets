@@ -1,0 +1,688 @@
+import systemDateTime from '@ohos.systemDateTime';
+import { util } from '@kit.ArkTS';
+import {
+  DIAGNOSTIC_DEFAULT_DURATION_MINUTES,
+  DiagnosticCaptureProfile,
+  DIAGNOSTIC_MAX_CAPTURE_BYTES,
+  DIAGNOSTIC_MAX_EVENTS,
+  DIAGNOSTIC_MAX_EVENT_BYTES,
+  DIAGNOSTIC_MAX_SESSION_REFS,
+  DiagnosticEventLevel,
+  DiagnosticAppLifecycle,
+  DiagnosticModuleId,
+  DiagnosticNetworkFacts,
+  DiagnosticOutcome,
+  DiagnosticRuntimeFacts,
+  DiagnosticStopReason,
+  DiagnosticWindowFacts,
+  DiagnosticWindowOrientation,
+  DiagnosticWindowRequestPhase,
+  copyDiagnosticNetworkFacts,
+  copyDiagnosticRuntimeFacts,
+  copyDiagnosticWindowFacts,
+  diagnosticDurationIsAllowed,
+  diagnosticEventIsAllowed,
+  diagnosticLevelForOutcome,
+  diagnosticNetworkFactsAreValid,
+  diagnosticOutcomeIsAllowed,
+  diagnosticRuntimeFactsAreValid,
+  diagnosticSafeInteger,
+  emptyDiagnosticNetworkFacts,
+  emptyDiagnosticRuntimeFacts,
+  emptyDiagnosticWindowFacts,
+  diagnosticWindowFactsAreValid,
+  diagnosticAllModules,
+  normalizeDiagnosticModules
+} from './DiagnosticCapturePolicy';
+
+export type DiagnosticCapturePhase = 'idle' | 'capturing' | 'readyToSave' | 'saving';
+
+/** Capture boundary notification used by live runtime samplers. */
+export type DiagnosticCaptureBoundary = 'started' | 'stopping';
+
+export type DiagnosticCaptureBoundaryListener =
+  (boundary: DiagnosticCaptureBoundary) => void;
+
+export type DiagnosticCaptureActionCode =
+  'ok' |
+  'invalid_duration' |
+  'already_active' |
+  'not_active' |
+  'not_ready' |
+  'busy' |
+  'stale_capture' |
+  'clock_unavailable';
+
+export interface DiagnosticClock {
+  uptimeMs(): number;
+  wallTimeMs(): number;
+}
+
+export interface DiagnosticCaptureEvent {
+  sequence: number;
+  elapsedMs: number;
+  wallTimeMs: number;
+  moduleId: DiagnosticModuleId;
+  eventCode: string;
+  level: DiagnosticEventLevel;
+  outcome: DiagnosticOutcome;
+  sessionRef: string;
+  generation: number;
+  code: number;
+  durationMs: number;
+  count: number;
+  bytes: number;
+  runtime: DiagnosticRuntimeFacts;
+  network: DiagnosticNetworkFacts;
+  window: DiagnosticWindowFacts;
+}
+
+/** One event of a capture as a 诊断时间线 line shows it (no session refs, no runtime facts). */
+export interface DiagnosticTimelineEntry {
+  wallTimeMs: number;
+  moduleId: DiagnosticModuleId;
+  eventCode: string;
+  outcome: DiagnosticOutcome;
+  code: number;
+  durationMs: number;
+}
+
+export interface DiagnosticCaptureStatus {
+  phase: DiagnosticCapturePhase;
+  captureId: string;
+  durationMinutes: number;
+  profile: DiagnosticCaptureProfile;
+  fullLog: boolean;
+  selectedModules: DiagnosticModuleId[];
+  startedWallTimeMs: number;
+  deadlineWallTimeMs: number;
+  endedWallTimeMs: number;
+  remainingSeconds: number;
+  eventCount: number;
+  droppedEventCount: number;
+  approximateBytes: number;
+  stopReason: DiagnosticStopReason | '';
+}
+
+/** What happened in one event, without any of its facts: enough to see a connection end while capturing. */
+export interface DiagnosticEventOutcome {
+  sequence: number;
+  moduleId: DiagnosticModuleId;
+  eventCode: string;
+  outcome: DiagnosticOutcome;
+  code: number;
+}
+
+export interface FrozenDiagnosticCapture {
+  captureId: string;
+  durationMinutes: number;
+  profile: DiagnosticCaptureProfile;
+  fullLog: boolean;
+  selectedModules: DiagnosticModuleId[];
+  startedWallTimeMs: number;
+  endedWallTimeMs: number;
+  stopReason: DiagnosticStopReason;
+  events: DiagnosticCaptureEvent[];
+  droppedEventCount: number;
+  approximateBytes: number;
+}
+
+class SystemDiagnosticClock implements DiagnosticClock {
+  uptimeMs(): number {
+    return systemDateTime.getUptime(systemDateTime.TimeType.STARTUP, false);
+  }
+
+  wallTimeMs(): number {
+    return Date.now();
+  }
+}
+
+export class DiagnosticCaptureRuntime {
+  private static instance: DiagnosticCaptureRuntime | null = null;
+
+  private readonly clock: DiagnosticClock;
+  private phase: DiagnosticCapturePhase = 'idle';
+  private captureOrdinal: number = 0;
+  private captureId: string = '';
+  private durationMinutes: number = DIAGNOSTIC_DEFAULT_DURATION_MINUTES;
+  private profile: DiagnosticCaptureProfile = 'selected';
+  private fullLog: boolean = false;
+  private selectedModules: DiagnosticModuleId[] = ['core.app'];
+  private startedUptimeMs: number = 0;
+  private deadlineUptimeMs: number = 0;
+  private startedWallTimeMs: number = 0;
+  private endedWallTimeMs: number = 0;
+  private stopReason: DiagnosticStopReason | '' = '';
+  private sequence: number = 0;
+  private events: DiagnosticCaptureEvent[] = [];
+  private approximateBytes: number = 0;
+  private droppedEventCount: number = 0;
+  private sessionIds: number[] = [];
+  private finalizing: boolean = false;
+  private boundaryListeners: DiagnosticCaptureBoundaryListener[] = [];
+
+  constructor(clock: DiagnosticClock = new SystemDiagnosticClock()) {
+    this.clock = clock;
+  }
+
+  static getInstance(): DiagnosticCaptureRuntime {
+    if (DiagnosticCaptureRuntime.instance === null) {
+      DiagnosticCaptureRuntime.instance = new DiagnosticCaptureRuntime();
+    }
+    return DiagnosticCaptureRuntime.instance;
+  }
+
+  start(durationMinutes: number,
+    moduleIds: string[] = ['core.app'], fullLog: boolean = false): DiagnosticCaptureActionCode {
+    if (!diagnosticDurationIsAllowed(durationMinutes)) { return 'invalid_duration'; }
+    if (this.phase !== 'idle') { return 'already_active'; }
+    try {
+      const uptime: number = this.safeClockInteger(this.clock.uptimeMs());
+      const wallTime: number = this.safeClockInteger(this.clock.wallTimeMs());
+      if (uptime < 0 || wallTime <= 0) { return 'clock_unavailable'; }
+      this.captureOrdinal += 1;
+      this.captureId = 'capture-' + this.captureOrdinal.toString();
+      this.durationMinutes = durationMinutes;
+      this.fullLog = fullLog === true;
+      this.profile = this.fullLog ? 'full' : 'selected';
+      this.selectedModules = this.fullLog ? diagnosticAllModules() :
+        normalizeDiagnosticModules(moduleIds);
+      this.startedUptimeMs = uptime;
+      this.deadlineUptimeMs = uptime + durationMinutes * 60 * 1000;
+      this.startedWallTimeMs = wallTime;
+      this.endedWallTimeMs = 0;
+      this.stopReason = '';
+      this.sequence = 0;
+      this.events = [];
+      this.approximateBytes = 0;
+      this.droppedEventCount = 0;
+      this.sessionIds = [];
+      this.finalizing = false;
+      this.phase = 'capturing';
+      this.appendEventAt(uptime, 'core.app', 'capture_started',
+        'started', 0, 0, 0, 0, this.selectedModules.length, 0,
+        emptyDiagnosticRuntimeFacts());
+      this.notifyBoundary('started');
+      return 'ok';
+    } catch (_err) {
+      this.resetCapture();
+      return 'clock_unavailable';
+    }
+  }
+
+  isModuleCapturing(moduleId: DiagnosticModuleId): boolean {
+    return this.phase === 'capturing' && this.selectedModules.indexOf(moduleId) >= 0;
+  }
+
+  /** Full mode is intentionally observable by samplers, while remaining read-only. */
+  isFullLogEnabled(): boolean {
+    return this.phase === 'capturing' && this.fullLog;
+  }
+
+  captureIdForModule(moduleId: DiagnosticModuleId): string {
+    return this.isModuleCapturing(moduleId) ? this.captureId : '';
+  }
+
+  /** Subscribe to start/stop boundaries without coupling the capture UI to samplers. */
+  onBoundary(listener: DiagnosticCaptureBoundaryListener): () => void {
+    if (this.boundaryListeners.indexOf(listener) < 0) {
+      this.boundaryListeners.push(listener);
+    }
+    let active: boolean = true;
+    return (): void => {
+      if (!active) { return; }
+      active = false;
+      const index: number = this.boundaryListeners.indexOf(listener);
+      if (index >= 0) { this.boundaryListeners.splice(index, 1); }
+    };
+  }
+
+  record(moduleId: DiagnosticModuleId, eventCode: string, outcome: DiagnosticOutcome,
+    correlationId: number = 0, generation: number = 0, code: number = 0,
+    durationMs: number = 0, count: number = 0, bytes: number = 0,
+    runtime?: DiagnosticRuntimeFacts,
+    network?: DiagnosticNetworkFacts,
+    window?: DiagnosticWindowFacts): boolean {
+    if (!this.isModuleCapturing(moduleId)) { return false; }
+    try {
+      if (!diagnosticEventIsAllowed(moduleId, eventCode) ||
+        !diagnosticOutcomeIsAllowed(outcome)) {
+        this.droppedEventCount += 1;
+        return false;
+      }
+      const safeCorrelation: number | null = diagnosticSafeInteger(correlationId);
+      const safeGeneration: number | null = diagnosticSafeInteger(generation);
+      const safeCode: number | null = diagnosticSafeInteger(code);
+      const safeDuration: number | null = diagnosticSafeInteger(durationMs);
+      const safeCount: number | null = diagnosticSafeInteger(count);
+      const safeBytes: number | null = diagnosticSafeInteger(bytes);
+      const safeRuntime: DiagnosticRuntimeFacts = runtime === undefined ?
+        emptyDiagnosticRuntimeFacts() : copyDiagnosticRuntimeFacts(runtime);
+      const safeNetwork: DiagnosticNetworkFacts = network === undefined ?
+        emptyDiagnosticNetworkFacts() : copyDiagnosticNetworkFacts(network);
+      const safeWindow: DiagnosticWindowFacts = window === undefined ?
+        emptyDiagnosticWindowFacts() : copyDiagnosticWindowFacts(window);
+      if (safeCorrelation === null || safeCorrelation < 0 ||
+        safeGeneration === null || safeGeneration < 0 || safeCode === null ||
+        safeDuration === null || safeDuration < 0 ||
+        safeCount === null || safeCount < 0 || safeBytes === null || safeBytes < 0 ||
+        !diagnosticRuntimeFactsAreValid(safeRuntime) ||
+        !diagnosticNetworkFactsAreValid(safeNetwork) ||
+        !diagnosticWindowFactsAreValid(safeWindow)) {
+        this.droppedEventCount += 1;
+        return false;
+      }
+      const uptime: number = this.safeClockInteger(this.clock.uptimeMs());
+      let eventUptime: number = uptime;
+      if (uptime >= this.deadlineUptimeMs) {
+        if (!this.finalizing) {
+          this.expireAt(uptime);
+          return false;
+        }
+        // The stopping callback is the last chance to sample live state. Keep
+        // that snapshot inside the capture's monotonic boundary even if the
+        // callback runs a few milliseconds after the deadline.
+        eventUptime = this.deadlineUptimeMs;
+      }
+      return this.appendEventAt(eventUptime, moduleId, eventCode, outcome,
+        safeCorrelation, safeGeneration, safeCode, safeDuration, safeCount, safeBytes,
+        safeRuntime, safeNetwork, safeWindow);
+    } catch (_err) {
+      this.droppedEventCount += 1;
+      return false;
+    }
+  }
+
+  stop(): DiagnosticCaptureActionCode {
+    if (this.phase === 'idle') { return 'not_active'; }
+    if (this.phase === 'saving') { return 'busy'; }
+    if (this.phase === 'readyToSave') { return 'ok'; }
+    if (this.finalizing) { return 'busy'; }
+    try {
+      const uptime: number = this.safeClockInteger(this.clock.uptimeMs());
+      if (uptime >= this.deadlineUptimeMs) {
+        this.expireAt(uptime);
+        return 'ok';
+      }
+      this.finalizing = true;
+      try {
+        this.notifyBoundary('stopping');
+        const elapsed: number = Math.max(0, uptime - this.startedUptimeMs);
+        this.appendEventAt(uptime, 'core.app', 'capture_stopped',
+          'succeeded', 0, 0, 0, elapsed, this.events.length, this.approximateBytes,
+          emptyDiagnosticRuntimeFacts());
+      } catch (_err) {
+        // A failed final sampler must not leave capture teardown half-open.
+      } finally {
+        this.finalizing = false;
+      }
+      this.freeze('manual', uptime);
+      return 'ok';
+    } catch (_err) {
+      return 'clock_unavailable';
+    }
+  }
+
+  status(): DiagnosticCaptureStatus {
+    this.refreshDeadlineSafely();
+    let remainingSeconds: number = 0;
+    if (this.phase === 'capturing') {
+      try {
+        const remainingMs: number = Math.max(0,
+          this.deadlineUptimeMs - this.safeClockInteger(this.clock.uptimeMs()));
+        remainingSeconds = Math.ceil(remainingMs / 1000);
+      } catch (_err) {
+        remainingSeconds = 0;
+      }
+    }
+    return {
+      phase: this.phase,
+      captureId: this.captureId,
+      durationMinutes: this.durationMinutes,
+      profile: this.profile,
+      fullLog: this.fullLog,
+      selectedModules: this.selectedModules.slice(),
+      startedWallTimeMs: this.startedWallTimeMs,
+      deadlineWallTimeMs: this.startedWallTimeMs > 0 ?
+        this.startedWallTimeMs + this.durationMinutes * 60 * 1000 : 0,
+      endedWallTimeMs: this.endedWallTimeMs,
+      remainingSeconds: remainingSeconds,
+      eventCount: this.events.length,
+      droppedEventCount: this.droppedEventCount,
+      approximateBytes: this.approximateBytes,
+      stopReason: this.stopReason
+    };
+  }
+
+  /**
+   * The running (or stopped, not yet saved) capture's events from `sinceWallTimeMs` on, as plain facts: the 诊断时间线
+   * of a 诊断证据包. Read-only; empty while there is no capture.
+   */
+  timelineSince(sinceWallTimeMs: number): DiagnosticTimelineEntry[] {
+    if (this.phase === 'idle') { return []; }
+    return this.events.filter((event: DiagnosticCaptureEvent): boolean => event.wallTimeMs >= sinceWallTimeMs)
+      .map((event: DiagnosticCaptureEvent): DiagnosticTimelineEntry => ({
+        wallTimeMs: event.wallTimeMs, moduleId: event.moduleId, eventCode: event.eventCode,
+        outcome: event.outcome, code: event.code, durationMs: event.durationMs
+      }));
+  }
+
+  /** Outcomes of the running capture's events after `sequence` (read-only; nothing while not capturing). */
+  outcomesSince(sequence: number): DiagnosticEventOutcome[] {
+    if (this.phase !== 'capturing') { return []; }
+    return this.events.filter((event: DiagnosticCaptureEvent): boolean => event.sequence > sequence)
+      .map((event: DiagnosticCaptureEvent): DiagnosticEventOutcome => ({
+        sequence: event.sequence, moduleId: event.moduleId, eventCode: event.eventCode, outcome: event.outcome,
+        code: event.code
+      }));
+  }
+
+  frozenCapture(): FrozenDiagnosticCapture | null {
+    this.refreshDeadlineSafely();
+    if (this.phase !== 'readyToSave' && this.phase !== 'saving') { return null; }
+    return {
+      captureId: this.captureId,
+      durationMinutes: this.durationMinutes,
+      profile: this.profile,
+      fullLog: this.fullLog,
+      selectedModules: this.selectedModules.slice(),
+      startedWallTimeMs: this.startedWallTimeMs,
+      endedWallTimeMs: this.endedWallTimeMs,
+      stopReason: this.stopReason === '' ? 'manual' : this.stopReason,
+      events: this.events.map((event: DiagnosticCaptureEvent): DiagnosticCaptureEvent => {
+        return this.copyEvent(event);
+      }),
+      droppedEventCount: this.droppedEventCount,
+      approximateBytes: this.approximateBytes
+    };
+  }
+
+  beginSaving(): DiagnosticCaptureActionCode {
+    this.refreshDeadlineSafely();
+    if (this.phase === 'saving') { return 'busy'; }
+    if (this.phase !== 'readyToSave') { return 'not_ready'; }
+    this.phase = 'saving';
+    return 'ok';
+  }
+
+  finishSaving(success: boolean): void {
+    if (this.phase !== 'saving') { return; }
+    if (success) {
+      this.resetCapture();
+    } else {
+      this.phase = 'readyToSave';
+    }
+  }
+
+  discard(expectedCaptureId: string = ''): DiagnosticCaptureActionCode {
+    if (this.phase === 'saving') { return 'busy'; }
+    if (this.phase === 'idle') { return 'not_active'; }
+    if (expectedCaptureId.length > 0 && expectedCaptureId !== this.captureId) {
+      return 'stale_capture';
+    }
+    this.resetCapture();
+    return 'ok';
+  }
+
+  private appendEventAt(uptime: number, moduleId: DiagnosticModuleId,
+    eventCode: string, outcome: DiagnosticOutcome,
+    correlationId: number, generation: number, code: number,
+    durationMs: number, count: number, bytes: number,
+    runtime: DiagnosticRuntimeFacts,
+    network: DiagnosticNetworkFacts = emptyDiagnosticNetworkFacts(),
+    window: DiagnosticWindowFacts = emptyDiagnosticWindowFacts()): boolean {
+    const terminalEvent: boolean = moduleId === 'core.app' &&
+      (eventCode === 'capture_stopped' || eventCode === 'capture_expired');
+    const eventLimit: number = terminalEvent ? DIAGNOSTIC_MAX_EVENTS : DIAGNOSTIC_MAX_EVENTS - 1;
+    if (this.events.length >= eventLimit) {
+      this.droppedEventCount += 1;
+      return false;
+    }
+    const sessionRef: string = this.sessionRefFor(correlationId);
+    if (correlationId > 0 && sessionRef === '') {
+      this.droppedEventCount += 1;
+      return false;
+    }
+    const elapsedMs: number = Math.max(0, uptime - this.startedUptimeMs);
+    const event: DiagnosticCaptureEvent = {
+      sequence: this.sequence + 1,
+      elapsedMs: elapsedMs,
+      wallTimeMs: this.startedWallTimeMs + elapsedMs,
+      moduleId: moduleId,
+      eventCode: eventCode,
+      level: diagnosticLevelForOutcome(outcome),
+      outcome: outcome,
+      sessionRef: sessionRef,
+      generation: generation,
+      code: code,
+      durationMs: durationMs,
+      count: count,
+      bytes: bytes,
+      runtime: copyDiagnosticRuntimeFacts(runtime),
+      network: copyDiagnosticNetworkFacts(network),
+      window: copyDiagnosticWindowFacts(window)
+    };
+    const eventBytes: number = new util.TextEncoder().encode(JSON.stringify(event)).length + 1;
+    const reservedTerminalBytes: number = terminalEvent ? 0 : DIAGNOSTIC_MAX_EVENT_BYTES;
+    if (eventBytes > DIAGNOSTIC_MAX_EVENT_BYTES ||
+      this.approximateBytes + eventBytes + reservedTerminalBytes > DIAGNOSTIC_MAX_CAPTURE_BYTES) {
+      this.droppedEventCount += 1;
+      return false;
+    }
+    this.sequence = event.sequence;
+    this.events.push(event);
+    this.approximateBytes += eventBytes;
+    return true;
+  }
+
+  private sessionRefFor(correlationId: number): string {
+    if (correlationId <= 0) { return ''; }
+    const existing: number = this.sessionIds.indexOf(correlationId);
+    if (existing >= 0) { return 'session-' + (existing + 1).toString(); }
+    if (this.sessionIds.length >= DIAGNOSTIC_MAX_SESSION_REFS) { return ''; }
+    this.sessionIds.push(correlationId);
+    return 'session-' + this.sessionIds.length.toString();
+  }
+
+  private expireAt(uptime: number): void {
+    if (this.phase !== 'capturing' || this.finalizing) { return; }
+    this.finalizing = true;
+    const eventUptime: number = Math.max(this.startedUptimeMs,
+      Math.min(uptime, this.deadlineUptimeMs));
+    try {
+      this.notifyBoundary('stopping');
+      this.appendEventAt(eventUptime, 'core.app', 'capture_expired',
+        'timeout', 0, 0, 0, this.durationMinutes * 60 * 1000,
+        this.events.length, this.approximateBytes, emptyDiagnosticRuntimeFacts());
+    } catch (_err) {
+      // A failed final sampler must not leave capture teardown half-open.
+    } finally {
+      this.finalizing = false;
+    }
+    this.freeze('deadline', eventUptime);
+  }
+
+  private freeze(reason: DiagnosticStopReason, uptime: number): void {
+    this.stopReason = reason;
+    this.endedWallTimeMs = this.startedWallTimeMs +
+      Math.max(0, uptime - this.startedUptimeMs);
+    this.phase = 'readyToSave';
+  }
+
+  private refreshDeadlineSafely(): void {
+    if (this.phase !== 'capturing') { return; }
+    try {
+      const uptime: number = this.safeClockInteger(this.clock.uptimeMs());
+      if (uptime < this.deadlineUptimeMs) { return; }
+      this.expireAt(uptime);
+    } catch (_err) {
+      // Clock failure must not affect the calling business path. The next
+      // status/record call can retry the deadline check.
+    }
+  }
+
+  private safeClockInteger(value: number): number {
+    if (!Number.isFinite(value) || value < 0) { throw new Error('clock'); }
+    return Math.floor(value);
+  }
+
+  private copyEvent(source: DiagnosticCaptureEvent): DiagnosticCaptureEvent {
+    return {
+      sequence: source.sequence,
+      elapsedMs: source.elapsedMs,
+      wallTimeMs: source.wallTimeMs,
+      moduleId: source.moduleId,
+      eventCode: source.eventCode,
+      level: source.level,
+      outcome: source.outcome,
+      sessionRef: source.sessionRef,
+      generation: source.generation,
+      code: source.code,
+      durationMs: source.durationMs,
+      count: source.count,
+      bytes: source.bytes,
+      runtime: copyDiagnosticRuntimeFacts(source.runtime),
+      network: copyDiagnosticNetworkFacts(source.network),
+      window: copyDiagnosticWindowFacts(source.window)
+    };
+  }
+
+  private resetCapture(): void {
+    this.phase = 'idle';
+    this.captureId = '';
+    this.durationMinutes = DIAGNOSTIC_DEFAULT_DURATION_MINUTES;
+    this.profile = 'selected';
+    this.fullLog = false;
+    this.selectedModules = ['core.app'];
+    this.startedUptimeMs = 0;
+    this.deadlineUptimeMs = 0;
+    this.startedWallTimeMs = 0;
+    this.endedWallTimeMs = 0;
+    this.stopReason = '';
+    this.sequence = 0;
+    this.events = [];
+    this.approximateBytes = 0;
+    this.droppedEventCount = 0;
+    this.sessionIds = [];
+    this.finalizing = false;
+  }
+
+  private notifyBoundary(boundary: DiagnosticCaptureBoundary): void {
+    const listeners: DiagnosticCaptureBoundaryListener[] = this.boundaryListeners.slice();
+    for (let index: number = 0; index < listeners.length; index++) {
+      try { listeners[index](boundary); } catch (_err) {}
+    }
+  }
+}
+
+export function isDiagnosticModuleCapturing(moduleId: DiagnosticModuleId): boolean {
+  try {
+    return DiagnosticCaptureRuntime.getInstance().isModuleCapturing(moduleId);
+  } catch (_err) {
+    return false;
+  }
+}
+
+export function isDiagnosticFullLogEnabled(): boolean {
+  try {
+    return DiagnosticCaptureRuntime.getInstance().isFullLogEnabled();
+  } catch (_err) {
+    return false;
+  }
+}
+
+export function diagnosticCaptureIdForModule(moduleId: DiagnosticModuleId): string {
+  try {
+    return DiagnosticCaptureRuntime.getInstance().captureIdForModule(moduleId);
+  } catch (_err) {
+    return '';
+  }
+}
+
+export function recordDiagnosticEvent(moduleId: DiagnosticModuleId,
+  eventCode: string, outcome: DiagnosticOutcome, correlationId: number = 0,
+  generation: number = 0, code: number = 0, durationMs: number = 0,
+  count: number = 0, bytes: number = 0,
+  runtime?: DiagnosticRuntimeFacts,
+  network?: DiagnosticNetworkFacts,
+  window?: DiagnosticWindowFacts): void {
+  try {
+    DiagnosticCaptureRuntime.getInstance().record(moduleId, eventCode, outcome,
+      correlationId, generation, code, durationMs, count, bytes, runtime, network, window);
+  } catch (_err) {
+    // Diagnostics are a best-effort side channel and can never fail a producer.
+  }
+}
+
+/** Record an app/window orientation lifecycle event without exposing raw labels. */
+export function recordDiagnosticWindowEvent(outcome: DiagnosticOutcome,
+  correlationId: number, generation: number, code: number,
+  durationMs: number, window: DiagnosticWindowFacts): boolean {
+  try {
+    return DiagnosticCaptureRuntime.getInstance().record(
+      'core.app', 'window_orientation_request', outcome, correlationId, generation,
+      code, durationMs, 0, 0, undefined, undefined, window);
+  } catch (_err) {
+    return false;
+  }
+}
+
+/** Record the current ability lifecycle without exposing ability/window IDs. */
+export function recordDiagnosticAppLifecycleEvent(outcome: DiagnosticOutcome,
+  lifecycle: DiagnosticAppLifecycle, generation: number = 0, code: number = 0): boolean {
+  try {
+    const window: DiagnosticWindowFacts = emptyDiagnosticWindowFacts();
+    window.appLifecycle = lifecycle;
+    window.windowGeneration = generation >= 0 && Number.isSafeInteger(generation) ? generation : 0;
+    return DiagnosticCaptureRuntime.getInstance().record(
+      'core.app', 'app_lifecycle', outcome, 0, generation >= 0 ? generation : 0,
+      code, 0, 0, 0, undefined, undefined, window);
+  } catch (_err) {
+    return false;
+  }
+}
+
+/** Record the post-WMS window state separately from the request trace. */
+export function recordDiagnosticWindowStateEvent(outcome: DiagnosticOutcome,
+  correlationId: number, generation: number, code: number,
+  durationMs: number, window: DiagnosticWindowFacts): boolean {
+  try {
+    return DiagnosticCaptureRuntime.getInstance().record(
+      'core.app', 'window_orientation_state', outcome, correlationId, generation,
+      code, durationMs, 0, 0, undefined, undefined, window);
+  } catch (_err) {
+    return false;
+  }
+}
+
+/** Compact producer for protocol pages that do not own the shared window helper. */
+export function recordDiagnosticWindowObservation(outcome: DiagnosticOutcome,
+  requestedOrientation: DiagnosticWindowOrientation,
+  appliedOrientation: DiagnosticWindowOrientation,
+  requestPhase: DiagnosticWindowRequestPhase,
+  generation: number, orientationApplied: boolean,
+  durationMs: number = 0): boolean {
+  try {
+    const window: DiagnosticWindowFacts = emptyDiagnosticWindowFacts();
+    window.requestedOrientation = requestedOrientation;
+    window.appliedOrientation = appliedOrientation;
+    window.requestPhase = requestPhase;
+    window.requestGeneration = generation >= 0 ? generation : 0;
+    window.orientationApplied = orientationApplied;
+    window.rotationSwitchControlled = requestedOrientation === 'auto_rotation_restricted' ||
+      requestedOrientation === 'auto_rotation_portrait_restricted' ||
+      requestedOrientation === 'auto_rotation_landscape_restricted' ||
+      requestedOrientation === 'auto_rotation_unspecified' ||
+      requestedOrientation === 'user_rotation_portrait' ||
+      requestedOrientation === 'user_rotation_landscape' ||
+      requestedOrientation === 'user_rotation_portrait_inverted' ||
+      requestedOrientation === 'user_rotation_landscape_inverted' ||
+      requestedOrientation === 'follow_desktop';
+    return DiagnosticCaptureRuntime.getInstance().record(
+      'core.app', 'window_orientation_state', outcome, 0,
+      generation >= 0 ? generation : 0, 0, durationMs,
+      orientationApplied ? 1 : 0, 0, undefined, undefined, window);
+  } catch (_err) {
+    return false;
+  }
+}

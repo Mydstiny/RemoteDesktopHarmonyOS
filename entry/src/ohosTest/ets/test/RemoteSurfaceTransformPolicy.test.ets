@@ -1,0 +1,94 @@
+import { describe, it, expect } from '@ohos/hypium';
+import {
+  normalizeRendererViewportToSurface,
+  remotePointToSurface,
+  surfaceDeltaToRemote,
+  surfacePointToRemote,
+  RemoteSurfaceTransform
+} from '../../../main/ets/services/RemoteSurfaceTransformPolicy';
+
+const TRANSFORM: RemoteSurfaceTransform = {
+  remoteWidth: 1920,
+  remoteHeight: 1080,
+  viewportX: 55.555555,
+  viewportY: 0,
+  viewportW: 888.88889,
+  viewportH: 500,
+  surfaceWidthPx: 1000,
+  surfaceHeightPx: 500,
+  surfaceWidthVp: 1000,
+  surfaceHeightVp: 500
+};
+
+const HIGH_DENSITY_TRANSFORM: RemoteSurfaceTransform = {
+  remoteWidth: 1920,
+  remoteHeight: 1080,
+  viewportX: 111.111111,
+  viewportY: 0,
+  viewportW: 1777.777778,
+  viewportH: 1000,
+  surfaceWidthPx: 2000,
+  surfaceHeightPx: 1000,
+  surfaceWidthVp: 1000,
+  surfaceHeightVp: 500
+};
+
+export default function remoteSurfaceTransformPolicyTest(): void {
+  describe('RemoteSurfaceTransformPolicy', (): void => {
+    it('center_roundtrips_between_remote_and_surface', 0, (): void => {
+      const local = remotePointToSurface(TRANSFORM, 960, 540);
+      expect(Math.abs(local.x - 500) < 0.01).assertTrue();
+      expect(Math.abs(local.y - 250) < 0.01).assertTrue();
+      const remote = surfacePointToRemote(TRANSFORM, local.x, local.y);
+      expect(Math.abs(remote.x - 960) < 0.1).assertTrue();
+      expect(Math.abs(remote.y - 540) < 0.1).assertTrue();
+    });
+
+    it('relative_delta_uses_content_viewport_once', 0, (): void => {
+      const delta = surfaceDeltaToRemote(TRANSFORM, 10, 0);
+      expect(Math.abs(delta.x - 21.6) < 0.1).assertTrue();
+      expect(Math.abs(delta.y) < 0.01).assertTrue();
+    });
+
+    it('letterbox_point_is_outside_remote_desktop', 0, (): void => {
+      const point = surfacePointToRemote(TRANSFORM, 10, 250);
+      expect(point.inside).assertFalse();
+    });
+
+    it('invalid_input_is_not_forwarded_as_a_pointer_position', 0, (): void => {
+      const point = surfacePointToRemote(TRANSFORM, NaN, 250);
+      expect(point.inside).assertFalse();
+      const delta = surfaceDeltaToRemote(TRANSFORM, Infinity, 1);
+      expect(Number.isFinite(delta.x)).assertTrue();
+      expect(Number.isFinite(delta.y)).assertTrue();
+    });
+
+    it('treats high-density ArkUI coordinates as vp', 0, (): void => {
+      const local = remotePointToSurface(HIGH_DENSITY_TRANSFORM, 960, 540);
+      expect(Math.abs(local.x - 500) < 0.01).assertTrue();
+      expect(Math.abs(local.y - 250) < 0.01).assertTrue();
+      const remote = surfacePointToRemote(HIGH_DENSITY_TRANSFORM, 500, 250);
+      expect(Math.abs(remote.x - 960) < 0.1).assertTrue();
+      expect(Math.abs(remote.y - 540) < 0.1).assertTrue();
+    });
+
+    it('does not fold out-of-bounds vp coordinates back into the surface', 0, (): void => {
+      const point = surfacePointToRemote(HIGH_DENSITY_TRANSFORM, 1500, 250);
+      expect(point.inside).assertFalse();
+    });
+
+    it('normalizes_a_stale_renderer_surface_before_using_current_arkui_geometry', 0, (): void => {
+      const viewport = normalizeRendererViewportToSurface(96, 54, 1728, 972,
+        1920, 1080, 960, 540);
+      expect(viewport !== null).assertTrue();
+      if (viewport !== null) {
+        expect(viewport.viewportX).assertEqual(48);
+        expect(viewport.viewportY).assertEqual(27);
+        expect(viewport.viewportW).assertEqual(864);
+        expect(viewport.viewportH).assertEqual(486);
+      }
+      expect(normalizeRendererViewportToSurface(0, 0, 0, 100,
+        1920, 1080, 960, 540) === null).assertTrue();
+    });
+  });
+}

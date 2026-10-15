@@ -1,0 +1,107 @@
+import { describe, it, expect } from '@ohos/hypium';
+import { ConnectionHealth, RemoteHost } from '../main/ets/model/RemoteHost';
+import {
+  displayConnectionHealth,
+  filterHostsByWorkspace,
+  hostListBottomSpacerVp,
+  hostListFabLiftVp,
+  hostListFabSizeVp,
+  moonlightHostMatchesSearch,
+  nextWorkspaceGroupId,
+  normalizeGroupId,
+  searchHosts
+} from '../main/ets/services/HostWorkspacePolicy';
+
+function host(id: string, label: string): RemoteHost {
+  const value = new RemoteHost();
+  value.id = id;
+  value.label = label;
+  value.host = id + '.example.test';
+  value.username = 'operator';
+  return value;
+}
+
+export default function hostWorkspacePolicyTest(): void {
+  describe('HostWorkspacePolicy', (): void => {
+    it('workspace_filter_should_use_normalized_group_ids', 0, (): void => {
+      const first = host('first', 'First');
+      first.groupId = 'Ops Team';
+      const second = host('second', 'Second');
+      second.groupId = 'ops-team';
+      expect(filterHostsByWorkspace([first, second, host('third', 'Third')], 'ops team').length).assertEqual(2);
+    });
+
+    it('workspace_filter_should_keep_source_order', 0, (): void => {
+      const first = host('first', 'First');
+      const second = host('second', 'Second');
+      first.groupId = 'ops';
+      second.groupId = 'ops';
+      const result = filterHostsByWorkspace([second, first], 'ops');
+      expect(result[0].id).assertEqual('second');
+      expect(result[1].id).assertEqual('first');
+    });
+
+    it('search_should_include_username_without_searching_credentials', 0, (): void => {
+      const userMatch = host('user-match', 'Server');
+      userMatch.username = 'admin';
+      userMatch.password = 'admin-secret';
+      expect(searchHosts([userMatch, host('other', 'Other')], 'admin')[0].id).assertEqual('user-match');
+      expect(searchHosts([userMatch], 'secret').length).assertEqual(0);
+    });
+
+    it('group_ids_keep_chinese_names', 0, (): void => {
+      expect(normalizeGroupId(' 办公室 A ')).assertEqual('办公室-a');
+      expect(normalizeGroupId('Ops Team')).assertEqual('ops-team');
+      expect(normalizeGroupId('研发部') === normalizeGroupId('办公室')).assertFalse();
+      const office = host('office', 'Office PC');
+      office.groupId = '办公室';
+      expect(filterHostsByWorkspace([office, host('other', 'Other')], '办公室').length).assertEqual(1);
+    });
+
+    it('search_finds_rustdesk_ids_but_a_locked_host_only_by_its_name', 0, (): void => {
+      const rustdesk = host('rd', 'Studio');
+      rustdesk.protocol = 'rustdesk';
+      rustdesk.customHostname = '123456789';
+      rustdesk.rustdeskProPeerId = 'peer-42';
+      expect(searchHosts([rustdesk], '1234').length).assertEqual(1);
+      expect(searchHosts([rustdesk], 'peer-42').length).assertEqual(1);
+      const locked = host('locked', 'Vault');
+      locked.locked = true;
+      expect(searchHosts([locked], 'locked.example').length).assertEqual(0);
+      expect(searchHosts([locked], 'vault').length).assertEqual(1);
+    });
+
+    it('a_locked_moonlight_host_is_found_only_by_its_name', 0, (): void => {
+      expect(moonlightHostMatchesSearch('Gaming PC', 'uuid-1', ['192.168.1.20'], false, '192.168')).assertTrue();
+      expect(moonlightHostMatchesSearch('Gaming PC', 'uuid-1', ['192.168.1.20'], true, '192.168')).assertFalse();
+      expect(moonlightHostMatchesSearch('Gaming PC', 'uuid-1', ['192.168.1.20'], true, 'gaming')).assertTrue();
+    });
+
+    it('excellent_health_should_show_normal_connection_and_latency', 0, (): void => {
+      expect(displayConnectionHealth(ConnectionHealth.EXCELLENT, 34)).assertEqual('连接正常 · 34 ms');
+    });
+
+    it('unknown_health_should_not_render_a_misleading_status', 0, (): void => {
+      expect(displayConnectionHealth(ConnectionHealth.UNKNOWN, 0)).assertEqual('');
+      expect(displayConnectionHealth(ConnectionHealth.UNKNOWN, 48)).assertEqual('');
+    });
+
+    it('workspace_group_tap_should_toggle_the_active_group_off', 0, (): void => {
+      expect(nextWorkspaceGroupId('', 'ops')).assertEqual('ops');
+      expect(nextWorkspaceGroupId('ops', 'ops')).assertEqual('');
+      expect(nextWorkspaceGroupId('ops-team', 'Ops Team')).assertEqual('');
+      expect(nextWorkspaceGroupId('ops', 'design')).assertEqual('design');
+    });
+
+    it('keeps_the_last_host_card_above_the_floating_add_button', 0, (): void => {
+      expect(hostListBottomSpacerVp('sm')).assertEqual(196);
+      expect(hostListBottomSpacerVp('md')).assertEqual(176);
+      expect(hostListBottomSpacerVp('lg')).assertEqual(176);
+      expect(hostListBottomSpacerVp('xl')).assertEqual(184);
+      ['sm', 'md', 'lg', 'xl'].forEach((breakpoint: string): void => {
+        expect(hostListBottomSpacerVp(breakpoint) >=
+          hostListFabLiftVp(breakpoint) + hostListFabSizeVp(breakpoint) + 16).assertTrue();
+      });
+    });
+  });
+}

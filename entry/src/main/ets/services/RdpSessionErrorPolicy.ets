@@ -1,0 +1,335 @@
+export enum RdpSessionErrorSource {
+  SERVER_ERROR_INFO = 'server-error-info',
+  LOCAL_RENDER_WATCHDOG = 'local-render-watchdog',
+  CONNECT_FAILURE = 'connect-failure',
+  TRANSPORT_FAILURE = 'transport-failure'
+}
+
+export const RDP_CONNECT_FAILURE_UNCLASSIFIED: string = 'E-RDP-CONNECT-UNCLASSIFIED';
+export const RDP_SESSION_END_UNCLASSIFIED: string = 'E-RDP-SESSION-END-UNCLASSIFIED';
+const FREERDP_LOGON_FAILURE_CODE: string = '0x20014';
+
+export interface RdpSessionErrorDialogModel {
+  title: string;
+  message: string;
+  code: string;
+  source: RdpSessionErrorSource;
+  /** NLA (CredSSP / NTLM) did not pass: the user may choose TLS sign-in without NLA for this host. */
+  suggestTlsWithoutNla?: boolean;
+  /**
+   * The security layer itself could not be agreed on or the server dropped
+   * the TLS/NLA request: worth a credential-free check whether the host only
+   * speaks the old Standard RDP Security layer (bastion hosts, old Windows).
+   */
+  checkStandardSecurity?: boolean;
+}
+
+/** FreeRDP connect errors from the NLA stage: authentication failed, logon failure, security negotiation. */
+const RDP_NLA_FAILURE_CODES: string[] = ['0x20009', '0x20014', '0x2000C'];
+
+export function rdpErrorSuggestsTlsWithoutNla(code: string): boolean {
+  return RDP_NLA_FAILURE_CODES.indexOf(code.toUpperCase().replace('0X', '0x')) >= 0;
+}
+
+/**
+ * FreeRDP connect errors a host limited to Standard RDP Security produces when
+ * only TLS/NLA is offered: no security layer agreed, the connection or TLS
+ * handshake refused, or the transport closed. Authentication failures are not
+ * here: they prove TLS/NLA was negotiated.
+ */
+const RDP_STANDARD_SECURITY_SUSPECT_CODES: string[] = ['0x20006', '0x20008', '0x2000C', '0x2000D'];
+
+export function rdpErrorMayNeedStandardSecurity(code: string): boolean {
+  return RDP_STANDARD_SECURITY_SUSPECT_CODES.indexOf(code.toUpperCase().replace('0X', '0x')) >= 0;
+}
+
+function extractBracketedHexCode(text: string, marker: string): string {
+  const envelopeStart: string = '[' + marker + '0x';
+  let remainder: string = text;
+  while (remainder.length > 0) {
+    const envelopeIndex: number = remainder.indexOf(envelopeStart);
+    if (envelopeIndex < 0) {
+      return '';
+    }
+    const hexStart: number = envelopeIndex + envelopeStart.length;
+    let hex: string = '';
+    let cursor: number = hexStart;
+    for (; cursor < remainder.length; cursor++) {
+      const ch: string = remainder.charAt(cursor);
+      const isHex: boolean = (ch >= '0' && ch <= '9') ||
+        (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+      if (!isHex) {
+        break;
+      }
+      hex += ch;
+    }
+    if (hex.length > 0 && hex.length <= 8 && cursor < remainder.length &&
+      remainder.charAt(cursor) === ']') {
+      return '0x' + hex;
+    }
+    remainder = remainder.substring(hexStart);
+  }
+  return '';
+}
+
+function validDiagnosticCode(code: string): boolean {
+  if (!code.startsWith('E-') || code.length > 96) {
+    return false;
+  }
+  for (let i = 0; i < code.length; i++) {
+    const ch: string = code.charAt(i);
+    const valid: boolean = (ch >= 'A' && ch <= 'Z') ||
+      (ch >= '0' && ch <= '9') || ch === '-';
+    if (!valid) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function extractNativeDiagnosticCode(text: string): string {
+  const marker: string = '[E-';
+  let remainder: string = text;
+  while (remainder.length > 0) {
+    const idx: number = remainder.indexOf(marker);
+    if (idx < 0) {
+      return '';
+    }
+    const closeRelative: number = remainder.substring(idx + 1).indexOf(']');
+    if (closeRelative < 0) {
+      return '';
+    }
+    const closeIndex: number = idx + 1 + closeRelative;
+    const code: string = remainder.substring(idx + 1, closeIndex).toUpperCase();
+    if (validDiagnosticCode(code) && !code.startsWith('E-RDP-STATE-') &&
+      !code.startsWith('E-CONNECT-STATE-') && !code.startsWith('E-RDP-ERRINFO-') &&
+      !code.startsWith('E-CONN-0X')) {
+      return code;
+    }
+    remainder = remainder.substring(closeIndex + 1);
+  }
+  return '';
+}
+
+function extractServerErrorInfoCode(text: string): string {
+  return extractBracketedHexCode(text, 'E-RDP-ERRINFO-');
+}
+
+function extractFreeRdpConnectionCode(text: string): string {
+  return extractBracketedHexCode(text, 'E-CONN-');
+}
+
+export function normalizeRdpErrorCode(raw: string, fallback: string): string {
+  const code: string = raw.length > 0 ? raw : fallback;
+  if (code.length <= 2) {
+    return fallback;
+  }
+  const upper: string = code.toUpperCase();
+  if (!upper.startsWith('0X')) {
+    return fallback;
+  }
+  let hex: string = upper.substring(2);
+  while (hex.length > 1 && hex.charAt(0) === '0') {
+    hex = hex.substring(1);
+  }
+  if (hex.length === 1) {
+    hex = '0' + hex;
+  }
+  return '0x' + hex;
+}
+
+function normalizedNativeCode(raw: string, fallback: string): string {
+  if (raw.length > 0) {
+    return normalizeRdpErrorCode(raw, fallback);
+  }
+  return fallback;
+}
+
+/*
+ * Do not scan arbitrary 0x values from the message. Certificate flags, selected
+ * protocols and other diagnostics also use hexadecimal notation; treating the
+ * first one as ErrorInfo is exactly how an unrelated failure can be mislabeled.
+ */
+function classifiedCode(message: string, fallback: string): string {
+  const serverCode: string = extractServerErrorInfoCode(message);
+  if (serverCode.length > 0) {
+    return normalizedNativeCode(serverCode, fallback);
+  }
+  const connectionCode: string = extractFreeRdpConnectionCode(message);
+  if (connectionCode.length > 0) {
+    return normalizedNativeCode(connectionCode, fallback);
+  }
+  const diagnosticCode: string = extractNativeDiagnosticCode(message);
+  return diagnosticCode.length > 0 ? diagnosticCode : fallback;
+}
+
+export function containsRdpServerErrorInfo(message: string): boolean {
+  return extractServerErrorInfoCode(message).length > 0;
+}
+
+function modelForCode(code: string, source: RdpSessionErrorSource): RdpSessionErrorDialogModel {
+  if (source === RdpSessionErrorSource.LOCAL_RENDER_WATCHDOG) {
+    return {
+      title: '画面正在恢复',
+      message: '连接仍保持，检测到本地送显暂时受阻，系统正在重试。',
+      code: 'RDP-LOCAL-RENDER-STALL',
+      source
+    };
+  }
+  switch (code) {
+    case 'E-RDP-AUTH-CRYPTO-LOCKED':
+      return {
+        title: '无法读取本机凭据',
+        message: '本机凭据存储已锁定，请先解锁后再连接 Restricted Admin 主机。',
+        code,
+        source
+      };
+    case 'E-RDP-AUTH-IDENTITY-MISMATCH':
+      return {
+        title: '需要重新输入 Hash',
+        message: '主机地址、用户名或登录身份模式已改变，请重新输入该主机的 NTLM Hash。',
+        code,
+        source
+      };
+    case 'E-RDP-AUTH-SECRET-REQUIRED':
+      return {
+        title: '缺少 Restricted Admin Hash',
+        message: '本机没有保存该主机的 NTLM Hash，请在主机编辑中重新输入。',
+        code,
+        source
+      };
+    case 'E-RDP-AUTH-HASH':
+      return {
+        title: 'Restricted Admin Hash 无效',
+        message: 'NTLM Hash 无效或无法配置，请确认输入的是该 Windows 账户的 32 位 NTLM Hash。',
+        code,
+        source
+      };
+    case 'E-RDP-AUTH-CONFIG':
+      return {
+        title: 'RDP 认证配置无效',
+        message: 'RDP 认证参数不完整或已过期，请重新选择认证方式后保存。',
+        code,
+        source
+      };
+    default:
+      break;
+  }
+  if (source === RdpSessionErrorSource.CONNECT_FAILURE && code === FREERDP_LOGON_FAILURE_CODE) {
+    return {
+      title: 'RDP 账号认证失败',
+      message: '请核对 Windows 账号、用户名/域格式、密码和远程登录权限。若使用 AD UPN（user@domain），检查全局“RDP 身份格式”；若当前选择 Microsoft Account 域模式，邮箱会按该域发送。域策略禁用 NTLM 时，当前 NLA 认证也可能不兼容。此码也可能来自本地 CredSSP/SSPI 凭据失败，不能单独证明密码错误。',
+      code,
+      source,
+      suggestTlsWithoutNla: true
+    };
+  }
+  if (source === RdpSessionErrorSource.CONNECT_FAILURE && rdpErrorSuggestsTlsWithoutNla(code)) {
+    return {
+      title: '网络级身份验证没有通过',
+      message: '这台电脑在登录前要求的网络级身份验证（NLA）没有通过。我们只能用 NTLM 完成 NLA，' +
+        '域策略禁用 NTLM、或只允许 Kerberos 时会出现这种情况；也可能是账号或密码不对。',
+      code,
+      source,
+      suggestTlsWithoutNla: true
+    };
+  }
+  if (source === RdpSessionErrorSource.CONNECT_FAILURE) {
+    return {
+      title: '你的会话已断开',
+      message: '远程会话连接失败；没有收到服务器 ErrorInfo。',
+      code,
+      source
+    };
+  }
+  if (source === RdpSessionErrorSource.TRANSPORT_FAILURE) {
+    return {
+      title: '你的会话已断开',
+      message: 'RDP 连接在客户端或网络侧异常结束；没有收到服务器 ErrorInfo。',
+      code,
+      source
+    };
+  }
+  switch (code) {
+    case '0x10':
+      return {
+        title: '你的会话已断开',
+        message: '远端 Windows 会话中的桌面窗口管理器（DWM）意外终止。',
+        code,
+        source
+      };
+    case '0xF':
+    case '0x11':
+    case '0x12':
+      return {
+        title: '你的会话已断开',
+        message: '远程会话中的图形显示组件启动失败。',
+        code,
+        source
+      };
+    case '0x01':
+      return {
+        title: '服务器请求断开会话',
+        message: '服务器请求结束当前会话（RPC initiated disconnect）；这不是图形管线故障。',
+        code,
+        source
+      };
+    case '0x112D':
+      return {
+        title: '你的会话已断开',
+        message: '服务器不支持当前请求的图形模式。',
+        code,
+        source
+      };
+    case '0x112E':
+      return {
+        title: '你的会话已断开',
+        message: '远程会话图形子系统重置失败。',
+        code,
+        source
+      };
+    case '0x112F':
+      return {
+        title: '你的会话已断开',
+        message: '远程会话图形子系统出现错误，无法继续图形编码。',
+        code,
+        source
+      };
+    default:
+      return {
+        title: '你的会话已断开',
+        message: '远程桌面会话被服务器断开。',
+        code,
+        source
+      };
+  }
+}
+
+export function rdpSessionErrorFromNativeMessage(message: string, fallbackCode: string,
+  fallbackSource: RdpSessionErrorSource = RdpSessionErrorSource.CONNECT_FAILURE): RdpSessionErrorDialogModel {
+  const code: string = classifiedCode(message, fallbackCode);
+  const source: RdpSessionErrorSource = containsRdpServerErrorInfo(message)
+    ? RdpSessionErrorSource.SERVER_ERROR_INFO
+    : fallbackSource;
+  const model: RdpSessionErrorDialogModel = modelForCode(code, source);
+  if (source === RdpSessionErrorSource.CONNECT_FAILURE && rdpErrorMayNeedStandardSecurity(code)) {
+    model.checkStandardSecurity = true;
+  }
+  return model;
+}
+
+export function rdpNoFrameWatchdogError(): RdpSessionErrorDialogModel {
+  return modelForCode('0x11', RdpSessionErrorSource.LOCAL_RENDER_WATCHDOG);
+}
+
+export function shouldCleanupRdpSessionBeforeErrorDismiss(): boolean {
+  return false;
+}
+
+export function shouldShowRdpSessionErrorAfterControlPanelDismiss(controlPanelVisible: boolean): boolean {
+  return controlPanelVisible;
+}
+
+export function rdpSessionErrorSheetPrefersLandscapeCenter(isRdpSession: boolean): boolean {
+  return isRdpSession;
+}

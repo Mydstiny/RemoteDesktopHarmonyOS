@@ -1,0 +1,145 @@
+import { describe, expect, it } from '@ohos/hypium';
+import {
+  DIAGNOSTIC_DEFAULT_DURATION_MINUTES,
+  DIAGNOSTIC_CAPTURE_SCHEMA_VERSION,
+  DIAGNOSTIC_REDACTION_POLICY_VERSION,
+  DiagnosticModuleId,
+  DiagnosticNetworkFacts,
+  DiagnosticRuntimeFacts,
+  diagnosticAllModules,
+  diagnosticDurationIsAllowed,
+  diagnosticDurationOptions,
+  diagnosticEventIsAllowed,
+  diagnosticLevelForOutcome,
+  diagnosticModuleIsKnown,
+  diagnosticModuleSpecs,
+  diagnosticNetworkFactsAreValid,
+  diagnosticNetworkFactsForAuthority,
+  diagnosticNetworkFactsForCandidates,
+  diagnosticNetworkFactsForEndpoints,
+  diagnosticOutcomeIsAllowed,
+  diagnosticRuntimeFactsAreValid,
+  emptyDiagnosticProtocolFacts,
+  emptyDiagnosticResourceFacts,
+  normalizeDiagnosticModules
+} from '../main/ets/services/DiagnosticCapturePolicy';
+
+export default function diagnosticCapturePolicyTest(): void {
+  describe('DiagnosticCapturePolicy', (): void => {
+    it('accepts_only_the_six_fixed_one_to_thirty_minute_options', 0, (): void => {
+      expect(diagnosticDurationOptions().join(',')).assertEqual('1,3,5,10,15,30');
+      expect(DIAGNOSTIC_DEFAULT_DURATION_MINUTES).assertEqual(10);
+      expect(DIAGNOSTIC_CAPTURE_SCHEMA_VERSION).assertEqual(10);
+      expect(DIAGNOSTIC_REDACTION_POLICY_VERSION).assertEqual(5);
+      expect(diagnosticDurationIsAllowed(1)).assertTrue();
+      expect(diagnosticDurationIsAllowed(30)).assertTrue();
+      expect(diagnosticDurationIsAllowed(0)).assertFalse();
+      expect(diagnosticDurationIsAllowed(2)).assertFalse();
+      expect(diagnosticDurationIsAllowed(31)).assertFalse();
+      expect(diagnosticDurationIsAllowed(Number.NaN)).assertFalse();
+    });
+
+    it('normalizes_modules_in_catalog_order_and_always_keeps_core', 0, (): void => {
+      const selected: DiagnosticModuleId[] = normalizeDiagnosticModules([
+        'connection.vnc', 'connection.rdp', 'connection.vnc', 'unknown'
+      ]);
+      expect(selected.length).assertEqual(3);
+      expect(selected[0]).assertEqual('core.app');
+      expect(selected[1]).assertEqual('connection.rdp');
+      expect(selected[2]).assertEqual('connection.vnc');
+      expect(diagnosticAllModules().length).assertEqual(11);
+      expect(diagnosticModuleSpecs()[0].alwaysEnabled).assertTrue();
+      expect(diagnosticModuleIsKnown('security.ssh_key')).assertTrue();
+      expect(diagnosticModuleIsKnown('security.totp')).assertFalse();
+    });
+
+    it('rejects_unknown_or_cross_module_event_codes', 0, (): void => {
+      expect(diagnosticEventIsAllowed('connection.rdp', 'rdp_state_changed')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.rdp', 'rdp_runtime_snapshot')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.rdp', 'rdp_display_layout')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.rustdesk', 'rustdesk_runtime_snapshot')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.rustdesk', 'rustdesk_preflight')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.rustdesk', 'rustdesk_display_switch')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.ssh_sftp', 'ssh_runtime_snapshot')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.vnc', 'vnc_runtime_snapshot')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.moonlight', 'moonlight_runtime_snapshot')).assertTrue();
+      expect(diagnosticEventIsAllowed('core.app', 'app_lifecycle')).assertTrue();
+      expect(diagnosticEventIsAllowed('core.app', 'window_orientation_state')).assertTrue();
+      expect(diagnosticEventIsAllowed('connection.vnc', 'rdp_state_changed')).assertFalse();
+      expect(diagnosticEventIsAllowed('connection.rdp', 'raw_error_message')).assertFalse();
+      expect(diagnosticEventIsAllowed('security.ssh_key', 'ssh_key_import')).assertTrue();
+    });
+
+    it('accepts_only_closed_runtime_facts_and_non_negative_counters', 0, (): void => {
+      const facts: DiagnosticRuntimeFacts = {
+        state: 'connected', backend: 'hardware', codec: 'h264', path: 'direct',
+        peerPlatform: 'windows', presentation: 'identity',
+        producerTransform: 'rotate_180', appliedTransform: 'identity',
+        desktopSurfaceCompatibility: true, producerTransformSampled: true,
+        producerTransformReadResult: 0, producerTransformSamples: 10,
+        producerTransformChanges: 1, producerTransformReadFailures: 0,
+        producerTransformClassMask: 10,
+        producerTransformMatrix: [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1],
+        appliedTextureTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        rendererTransformValid: true, rendererTransformVersion: 2,
+        rendererRotationQuarterTurns: 0, rendererFlipX: false, rendererFlipY: true,
+        decoderGeneration: 3, rendererGeneration: 4, width: 1920, height: 1080,
+        frames: 10, dropped: 1, errors: 0, queueDepth: 2, latencyMs: 31,
+        protocol: emptyDiagnosticProtocolFacts(), resources: emptyDiagnosticResourceFacts()
+      };
+      expect(diagnosticRuntimeFactsAreValid(facts)).assertTrue();
+      facts.presentation = 'validated_producer';
+      expect(diagnosticRuntimeFactsAreValid(facts)).assertTrue();
+      facts.producerTransform = 'rotate_90';
+      expect(diagnosticRuntimeFactsAreValid(facts)).assertTrue();
+      facts.width = -1;
+      expect(diagnosticRuntimeFactsAreValid(facts)).assertFalse();
+      facts.width = 1920;
+      facts.backend = 'endpoint.example.invalid' as 'hardware';
+      expect(diagnosticRuntimeFactsAreValid(facts)).assertFalse();
+    });
+
+    it('classifies_ipv4_ipv6_hostname_and_mixed_candidates_without_addresses', 0, (): void => {
+      const ipv6: DiagnosticNetworkFacts = diagnosticNetworkFactsForEndpoints(
+        '2001:db8::20', 3389, 'gateway.example.invalid', 443);
+      expect(ipv6.configuredEndpointFamily).assertEqual('ipv6');
+      expect(ipv6.configuredRouteFamily).assertEqual('hostname');
+      expect(ipv6.hostnameCandidate).assertTrue();
+      expect(ipv6.ipv6Candidate).assertTrue();
+      expect(ipv6.ipv4Candidate).assertFalse();
+      expect(diagnosticNetworkFactsAreValid(ipv6)).assertTrue();
+
+      const routedScoped: DiagnosticNetworkFacts = diagnosticNetworkFactsForEndpoints(
+        '192.0.2.20', 22, 'fe80::20%3', 22);
+      expect(routedScoped.configuredRouteFamily).assertEqual('ipv6');
+      expect(routedScoped.ipv4Candidate).assertTrue();
+      expect(routedScoped.ipv6Candidate).assertTrue();
+      expect(routedScoped.scopedIpv6).assertTrue();
+
+      const scoped: DiagnosticNetworkFacts = diagnosticNetworkFactsForAuthority(
+        '[fe80::20%3]:47989');
+      expect(scoped.configuredEndpointFamily).assertEqual('ipv6');
+      expect(scoped.ipv6Candidate).assertTrue();
+      expect(scoped.scopedIpv6).assertTrue();
+
+      const mixed: DiagnosticNetworkFacts = diagnosticNetworkFactsForCandidates(
+        ['ipv6', 'ipv4', 'unspecified']);
+      expect(mixed.configuredEndpointFamily).assertEqual('mixed');
+      expect(mixed.hostnameCandidate).assertTrue();
+      expect(mixed.ipv4Candidate).assertTrue();
+      expect(mixed.ipv6Candidate).assertTrue();
+      mixed.scopedIpv6 = true;
+      expect(diagnosticNetworkFactsAreValid(mixed)).assertTrue();
+      mixed.ipv6Candidate = false;
+      expect(diagnosticNetworkFactsAreValid(mixed)).assertFalse();
+    });
+
+    it('uses_a_closed_outcome_set_and_derives_levels_without_free_text', 0, (): void => {
+      expect(diagnosticOutcomeIsAllowed('succeeded')).assertTrue();
+      expect(diagnosticOutcomeIsAllowed('native said password=secret')).assertFalse();
+      expect(diagnosticLevelForOutcome('succeeded')).assertEqual('info');
+      expect(diagnosticLevelForOutcome('retry')).assertEqual('warn');
+      expect(diagnosticLevelForOutcome('failed')).assertEqual('error');
+    });
+  });
+}

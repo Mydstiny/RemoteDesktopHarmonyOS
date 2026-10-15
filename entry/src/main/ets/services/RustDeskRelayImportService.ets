@@ -1,0 +1,151 @@
+/**
+ * RustDesk 客户端服务器配置导入。
+ *
+ * 官方客户端导出的分享串是：
+ *   base64url(JSON({ host, relay, api, key })) 再整体反转
+ * 同时兼容旧版直接导出的 JSON 文本。文件扩展名不是协议的一部分，
+ * 所以这里按内容识别，允许用户导入从其他 RustDesk 客户端复制保存的任意文件。
+ */
+import { picker, fileIo } from '@kit.CoreFileKit';
+import { util } from '@kit.ArkTS';
+import {
+  EndpointAddressResult,
+  endpointTransportHost,
+  parseEndpointAuthority
+} from './EndpointAddressPolicy';
+
+export interface RustDeskRelayImportResult {
+  ok: boolean;
+  fileName: string;
+  idServer: string;
+  idServerPort: number;
+  relayServer: string;
+  relayPort: number;
+  apiServer: string;
+  key: string;
+  error: string;
+}
+
+interface RustDeskExportObject {
+  host?: string;
+  relay?: string;
+  api?: string;
+  key?: string;
+  idServer?: string;
+  relayServer?: string;
+  apiServer?: string;
+}
+
+class RustDeskEndpoint {
+  host: string = '';
+  port: number = 0;
+  valid: boolean = true;
+}
+
+function fileNameFromUri(uri: string): string {
+  let value = uri;
+  const query = value.indexOf('?');
+  if (query >= 0) { value = value.substring(0, query); }
+  const slash = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
+  let name = slash >= 0 ? value.substring(slash + 1) : value;
+  try { name = decodeURIComponent(name); } catch (_err) { /* keep URI tail */ }
+  return name.trim() === '' ? 'rustdesk-server-config' : name.trim();
+}
+
+function reverse(value: string): string {
+  return value.split('').reverse().join('');
+}
+
+function endpoint(value: string, defaultPort: number): RustDeskEndpoint {
+  const result = new RustDeskEndpoint();
+  const parsed: EndpointAddressResult = parseEndpointAuthority(value, defaultPort);
+  if (!parsed.ok || parsed.endpoint.scope !== '') {
+    result.valid = false;
+    return result;
+  }
+  result.host = endpointTransportHost(parsed.endpoint);
+  result.port = parsed.endpoint.port;
+  return result;
+}
+
+export class RustDeskRelayImportService {
+  static readonly MAX_FILE_SIZE: number = 256 * 1024;
+
+  async pickAndParse(): Promise<RustDeskRelayImportResult | null> {
+    let file: fileIo.File | null = null;
+    try {
+      const uris: string[] = await new picker.DocumentViewPicker().select(new picker.DocumentSelectOptions());
+      if (uris.length === 0) { return null; }
+      const uri = uris[0];
+      const fileName = fileNameFromUri(uri);
+      file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      const size = fileIo.statSync(file.fd).size;
+      if (size <= 0 || size > RustDeskRelayImportService.MAX_FILE_SIZE) {
+        fileIo.closeSync(file); file = null;
+        return this.failure(fileName, size <= 0 ? '配置文件为空' : '配置文件超过 256 KB 限制');
+      }
+      const buffer = new ArrayBuffer(size);
+      const read = fileIo.readSync(file.fd, buffer);
+      fileIo.closeSync(file); file = null;
+      if (read !== size) { return this.failure(fileName, '配置文件读取不完整'); }
+      const text = new util.TextDecoder().decodeToString(new Uint8Array(buffer)).replace(/^\uFEFF/, '').trim();
+      return this.parse(fileName, text);
+    } catch (err) {
+      if (file !== null) { try { fileIo.closeSync(file); } catch (_closeErr) { /* ignore */ } }
+      return this.failure('', '配置文件读取失败: ' + JSON.stringify(err));
+    }
+  }
+
+  parse(fileName: string, text: string): RustDeskRelayImportResult {
+    let object: RustDeskExportObject | null = this.parseJson(text);
+    if (object === null) {
+      const encoded = reverse(text).replace(/-/g, '+').replace(/_/g, '/');
+      const padded = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+      try {
+        const bytes = new util.Base64Helper().decodeSync(padded);
+        const decoded = new util.TextDecoder().decodeToString(bytes).trim();
+        object = this.parseJson(decoded);
+      } catch (_err) { object = null; }
+    }
+    if (object === null) { return this.failure(fileName, '无法识别 RustDesk 导出配置，请选择客户端“导出服务器配置”生成的内容'); }
+
+    const rawId = object.host ?? object.idServer ?? '';
+    const rawRelay = object.relay ?? object.relayServer ?? '';
+    if (rawId.length === 0) { return this.failure(fileName, '导出配置缺少 ID 服务器'); }
+    const id = endpoint(rawId, 21116);
+    if (!id.valid) {
+      return this.failure(fileName, 'ID 服务器地址或端口无效');
+    }
+    // Absence follows the hbbs-advertised route. Do not turn an omitted
+    // override into a same-host hbbr assumption during import.
+    const relay = endpoint(rawRelay.length > 0 ? rawRelay : id.host, 21117);
+    if (!relay.valid) {
+      return this.failure(fileName, 'Relay 服务器地址或端口无效');
+    }
+    return {
+      ok: true, fileName, idServer: id.host, idServerPort: id.port,
+      relayServer: rawRelay.trim() === '' ? '' : relay.host, relayPort: relay.port,
+      // `key` can be hbbs/hbbr's arbitrary shared access text.  Trim only
+      // endpoint fields; changing even one leading '=' or whitespace byte in
+      // the key makes the server reject its licence_key comparison.
+      apiServer: (object.api ?? object.apiServer ?? '').trim(), key: (object.key ?? ''), error: ''
+    };
+  }
+
+  private parseJson(text: string): RustDeskExportObject | null {
+    try {
+      const value = JSON.parse(text) as RustDeskExportObject;
+      if (value !== null && typeof value === 'object') {
+        const hasField = typeof value.host === 'string' || typeof value.idServer === 'string' ||
+          typeof value.relay === 'string' || typeof value.relayServer === 'string';
+        if (hasField) { return value; }
+      }
+    } catch (_err) { /* try official reversed base64 format */ }
+    return null;
+  }
+
+  private failure(fileName: string, error: string): RustDeskRelayImportResult {
+    return { ok: false, fileName, idServer: '', idServerPort: 21116, relayServer: '', relayPort: 21117,
+      apiServer: '', key: '', error };
+  }
+}

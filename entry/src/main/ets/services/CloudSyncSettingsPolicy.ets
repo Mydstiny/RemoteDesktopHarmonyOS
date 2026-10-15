@@ -1,0 +1,120 @@
+const CLOUD_USER_SETTING_NAMES: string[] = [
+  'accentColor',
+  'currentTheme',
+  'followSystem',
+  'wallpaperColor',
+  'wallpaperIdx',
+  'haloColorLight',
+  'haloColorDark',
+  'hostAddMode',
+  'totpLogoMode',
+  'settingsVisualStyle'
+];
+
+// Structured organization/workspace rows share usersettings. Values are
+// serialized JSON strings so CloudStore keeps its primitive-value contract.
+const PRO_STRUCTURED_SETTING_PREFIXES: string[] = [
+  'pro.org.groups.v1',
+  'pro.org.membership.v1',
+  'pro.ws.'
+];
+
+/**
+ * These keys existed in the legacy cloud usersettings allowlist.  They remain
+ * readable from device Preferences after an upgrade, but must not be uploaded
+ * or applied from cloud because their correct value depends on the local
+ * screen, input devices, network, performance or protocol runtime.
+ */
+const DEVICE_LOCAL_USER_SETTING_NAMES: string[] = [
+  'secretPresentationPolicyV1',
+  'ambientLightEffectEnabled',
+  'liveViewEnabled',
+  'liveViewMode',
+  'virtualMouseStyle',
+  'sshTerminalForegroundColor',
+  'sshTerminalFontSize',
+  'sshTerminalLineSpacing',
+  'terminalFgColor',
+  'terminalFontSize',
+  'terminalLineSpacing',
+  'useNativeTerminalCore',
+  'rdpDesktopPreset',
+  'rdpDesktopResolutionId',
+  'rdpCustomWidth',
+  'rdpCustomHeight',
+  'rdpRemoteUiScale',
+  'rdpDesktopScaleMode',
+  'rdpDesktopScalePercent',
+  'rdpDeviceScaleMode',
+  'rdpDeviceScalePercent',
+  'rdpColorDepth',
+  'rdpAudioEnabled',
+  'rdpClipboardEnabled',
+  'rdpDriveEnabled',
+  'rdpDriveName',
+  'rdpControlMode',
+  'rdpAuthIdentityMode',
+  'remoteWheelPreferenceVersion',
+  'rdpReverseWheel',
+  'rustdeskReverseWheel',
+  'sshReverseWheel',
+  'vncReverseWheel',
+  'moonlightReverseWheel',
+  'remotePinchZoomPreferenceVersion',
+  'rdpPinchZoomEnabled',
+  'rustdeskPinchZoomEnabled',
+  'sshPinchZoomEnabled',
+  'vncPinchZoomEnabled',
+  'moonlightPinchZoomEnabled',
+  'remotePortraitDisplayPreferenceVersion',
+  'remotePortraitDisplayRevision',
+  'remotePortraitDisplayEncoded',
+  'remotePortraitSidebarHeightMode',
+  'rdpPortraitDisplayEnabled',
+  'rdpPortraitDisplayMode',
+  'rustdeskPortraitDisplayEnabled',
+  'rustdeskPortraitDisplayMode',
+  'vncPortraitDisplayEnabled',
+  'vncPortraitDisplayMode',
+  'moonlightPortraitDisplayEnabled',
+  'moonlightPortraitDisplayMode',
+  'remoteKeyboardAutoOpenOnRemoteClick',
+  'remoteKeyboardBehaviorVersion',
+  'remoteKeyboardAutoOpenPolicy',
+  'remoteKeyboardInputIntent',
+  'remoteKeyboardAvoidanceEnabled',
+  'remoteKeyboardPlacement',
+  'remoteKeyboardGapVp',
+  'rustdeskImageQuality',
+  'rustdeskFps',
+  'rustdeskCodec',
+  'rustdeskDirectIp',
+  'rustdeskDirectPort',
+  'rustdeskLanDiscovery',
+  'rustdeskPrivacyMode',
+  'rustdeskAudioEnabled',
+  'rustdeskClipboardEnabled',
+  'rustdeskFilePasteEnabled',
+  'rustdeskControlMode'
+];
+
+export type CloudUserSettingValue = string | number | boolean;
+
+export function cloudUserSettingNames(): string[] {
+  return CLOUD_USER_SETTING_NAMES.slice();
+}
+
+export function deviceLocalUserSettingNames(): string[] {
+  return DEVICE_LOCAL_USER_SETTING_NAMES.slice();
+}
+
+export function cloudUserSettingIsDeviceLocal(key: string): boolean {
+  return DEVICE_LOCAL_USER_SETTING_NAMES.indexOf(key) >= 0;
+}
+
+/** 仅同步可跨设备复用的外观、分组与工作区数据；设备、协议运行时、账号和临时会话状态留在本机。 */
+export function cloudUserSettingIsSyncable(key: string): boolean {
+  if (CLOUD_USER_SETTING_NAMES.indexOf(key) >= 0) { return true; }
+  return PRO_STRUCTURED_SETTING_PREFIXES.some((prefix: string): boolean =>
+    prefix.endsWith('.') ? key.indexOf(prefix) === 0 && key.length > prefix.length : key === prefix);
+}
