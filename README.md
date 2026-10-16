@@ -218,7 +218,7 @@ SFTP 上传或下载开始后，可在传输状态区域取消任务；保留在
 
 备份提供导出、导入前预检、完整性检查与事务恢复，无效备份不会覆盖现有数据，恢复失败时会回滚。当前备份默认不导出登录令牌、密码、私钥、TOTP 密钥与设备信任，因此恢复主机记录后，部分认证信息仍需重新配置。
 
-备份仍可能包含敏感信息，请存放在可信位置。数据处理说明见[隐私政策](https://mydstiny.github.io/RemoteDesktopHarmonyOS/privacy/)，安全问题报告方式见[安全政策](SECURITY.md)。
+备份仍可能包含敏感信息，请存放在可信位置。安全问题报告方式见[安全政策](SECURITY.md)。
 
 ## 连接准备与常见问题
 
@@ -288,7 +288,6 @@ SFTP 上传或下载开始后，可在传输状态区域取消任务；保留在
 | 贡献代码或改进文档 | [贡献指南](CONTRIBUTING.md) |
 | 提交问题或功能建议 | [GitHub Issues](https://github.com/Mydstiny/RemoteDesktopHarmonyOS/issues) |
 | 私密报告安全问题 | [安全政策](SECURITY.md) |
-| 了解隐私与数据处理 | [隐私政策](https://mydstiny.github.io/RemoteDesktopHarmonyOS/privacy/) |
 
 欢迎贡献文档、问题复现和改进建议。反馈时请说明协议、设备类型、版本与复现步骤，并移除凭据、主机地址、证书和用户数据。
 

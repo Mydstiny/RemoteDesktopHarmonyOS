@@ -678,20 +678,6 @@ export struct AboutSettingsSheet {
           this.policySection('联系我们',
             '如有隐私或数据处理问题，请发送邮件至 lijiong1219@petalmail.com。')
 
-          Row() {
-            Text('完整隐私政策').fontSize(AppTheme.fontSize.body).fontWeight(FontWeight.Medium)
-              .fontColor(this.pal().text).fontFamily(this.font())
-            Blank()
-            Text('在浏览器中打开 >')
-              .fontSize(12).fontColor(this.accentColor).fontFamily(this.font())
-          }
-          .width('100%')
-          .padding({ left: 14, right: 14, top: 14, bottom: 14 })
-          .borderRadius(16).backgroundColor(this.pal().surface)
-          .margin({ bottom: 12 })
-          .onClick((): void => {
-            this.openUrl('https://mydstiny.github.io/RemoteDesktopHarmonyOS/privacy/');
-          })
         }.width('100%').padding({ left: 24, right: 24, bottom: 22 })
       }.height(this.breakpoint === 'sm' ? 440 : 520)
     }
